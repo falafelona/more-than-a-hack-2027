@@ -1,2 +1,2 @@
 # The configuration we submit. Frozen on Sat 14 Nov (tag v1.0-freeze).
-# Starts as a copy of baseline.yaml; changes only via a PR that links an experiment record.
+# Starts as a copy of baseline.yaml; changes only via a PR with a row in experiments/RESULTS.md.

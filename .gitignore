@@ -1,5 +1,5 @@
 # -----------------------------------------------------------------------------------------------
-# This repository is PUBLIC. Match data lives outside it ($MTAH_DATA_DIR, docs/decisions.md D1).
+# This repository is submitted publicly. Match data lives outside it ($MTAH_DATA_DIR, docs/decisions.md D1).
 # The patterns below are a backstop in case someone puts data here by habit.
 # -----------------------------------------------------------------------------------------------
 

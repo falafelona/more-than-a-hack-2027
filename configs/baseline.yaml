@@ -1,5 +1,5 @@
 # Config that reproduces the official baseline_smooth50 (spellF1 0.2433 on the full match).
-# `make check-baseline` will compare our output with the organisers' published file.
+# Compare our output with the organisers' published file to prove the pipeline is correct.
 #
 # Will contain:
 #   ball:       method none             (no gap filling)

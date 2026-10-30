@@ -1,7 +1,5 @@
 # Results
 
-_Generated from `experiments/runs/` by `make results` (once it exists). Don't edit by hand._
-
-| ID | Change | spellF1 | macroF1 | Source |
-|---|---|---|---|---|
-| E0 | Official `baseline_smooth50` | **0.2433** | 0.6724 | Organisers, full match: the floor to beat |
+| Commit | Change | Dev spellF1 | Possessions | Public check | Verdict |
+|---|---|---|---|---|---|
+| — | Official `baseline_smooth50`: full-match spellF1 **0.2433**, macroF1 0.6724 (organisers) | — | — | — | Floor to beat |

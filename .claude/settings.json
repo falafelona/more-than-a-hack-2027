@@ -15,8 +15,7 @@
       "Read(**/*.pkl)",
       "Read(**/*.npz)",
       "Bash(make submission:*)",
-      "Bash(make check-baseline:*)",
-      "Bash(make eval:*)",
+      "Bash(python scripts/bootstrap_eval.py:*)",
       "Bash(python -m falafelona run:*)"
     ]
   }
