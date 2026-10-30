@@ -47,6 +47,6 @@ run(cfg) -> writes outputs/Falafelona.csv, returns {sha256, counts}
 
 ## X and the second half
 
-`pipeline.py` writes `X` on ungraded frames, using the official `games.half_video_blocks`. Graded frames are always `H`, `A` or `D`.
+The `X` policy is not agreed yet. D14 proposes that `pipeline.py` writes `X` only on ungraded frames, using the official `games.half_video_blocks`.
 
 The second half is graded from frame 110,808, before its kickoff, and those frames are dead ball. Detect the kickoff from the `Kick Off (Start)` Smart Tag rather than hard-coding a frame.

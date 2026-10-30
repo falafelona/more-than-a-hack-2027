@@ -4,17 +4,18 @@
 
 Competition terms can disqualify the team, so these are not optional.
 
-1. Keep the data outside this repo, on an encrypted disk image, and point to it:
+1. Keep the data outside this repo and point to it:
    ```bash
    export MTAH_DATA_DIR=/path/to/mtah-data
    ```
    Do not unpack it into `vendor/challenge/data/`, even though the official guide says `./data`.
-2. Eject the disk whenever AI tools are running.
-3. Start AI tools from inside this repo, never from your home folder.
-4. Run the real pipeline yourself, in your own terminal, with no AI session running.
-5. Logs, PRs and chat show aggregates only: counts and scores, never rows, coordinates or screenshots of data.
+2. Start AI tools from inside this repo, never from your home folder.
+3. Run the real pipeline yourself, in your own terminal, with no AI session running.
+4. Logs, PRs and chat show aggregates only: counts and scores, never rows, coordinates or screenshots of data.
 
 `.gitignore` only stops git. It does not stop an AI tool from reading a file.
+
+Stronger protection for those who can use it is in decision D16, which is proposed, not required.
 
 ## Setup
 

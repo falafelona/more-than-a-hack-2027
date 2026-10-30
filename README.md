@@ -36,13 +36,13 @@ tracking data
   → dead-ball score                 deadball.py
   → per-frame team evidence         possession.py
   → H/A/D decoder                   possession.py
-  → X on ungraded frames            pipeline.py
+  → final labels                    pipeline.py
   → Falafelona.csv
 ```
 
 **The decoder is the centre of the system.** The features say what is likely on each frame, and the decoder chooses the best whole sequence. Every switch has a cost, so brief wrong evidence cannot create a false possession, and flicker disappears.
 
-The decoder uses three states because every graded frame is `H`, `A` or `D`. `X` is written afterwards, only on ungraded frames.
+The decoder uses three states because every graded frame is `H`, `A` or `D`. Where we write `X` is still being decided (D14).
 
 See [docs/architecture.md](docs/architecture.md) for the stages and [docs/decisions.md](docs/decisions.md) for why.
 
