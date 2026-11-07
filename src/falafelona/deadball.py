@@ -13,6 +13,8 @@
 # Methods are selected via the `deadball:` section of the config.
 import numpy as np
 
+from falafelona.vendor import games
+
 
 class DeadBall:
     """Scores how likely each frame is dead ball (0 = alive, 1 = dead)."""
@@ -25,9 +27,12 @@ class DeadBall:
     def score(self):
         """Run the method named in the config."""
         method = self.cfg["method"]
-        if method == "ball_missing":
+        if method == "out_of_bounds":
+            return self.out_of_bounds()
+        elif method == "ball_missing":
             return self.ball_missing()
-        raise ValueError(f"unknown deadball method: {method}")
+        raise ValueError(f"unknown deadball method : {method}")
+        
 
     def ball_missing(self):
         """Official baseline: dead (1.0) wherever the ball is not seen, alive (0.0) otherwise."""
@@ -36,8 +41,21 @@ class DeadBall:
         missing = missing.astype(float)
         return missing
 
+    def out_of_bounds(self):
+        """1.0 where the ball is clearly past a line (by more than out_margin), else 0.0."""
+        length, width = games.GAMES[games.GAME]["pitch"]
+        margin = self.cfg["out_margin"]
+        ball_x = self.data.ball_xy[:,0] # ball position along the length
+        ball_y = self.data.ball_xy[:,1] # ball position along the width
+        past_far_goal_line = ball_x > length + margin
+        past_near_goal_line = ball_x < 0 - margin
+        past_bottom_touchline = ball_y < 0 - margin
+        past_top_touchline = ball_y > width + margin
+        out = past_bottom_touchline | past_far_goal_line | past_near_goal_line | past_top_touchline
+        out = out.astype(float)
+        return out 
 
-
+        
 def detect(match, ball, cfg):
     """What pipeline.py calls (docs/architecture.md)."""
     return DeadBall(match, ball, cfg).score()
