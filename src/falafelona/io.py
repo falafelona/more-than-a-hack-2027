@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from falafelona import vendor
+import vendor
 
 games = vendor.games
 
@@ -45,7 +45,9 @@ class Match:
     fps: float
     period: np.ndarray       # int8[n]: 1, 2, or 0 = outside the graded halves
     ball_xy: np.ndarray      # float[n, 2], NaN where the ball is missing
+    ball_speed: np.ndarray
     players_xy: np.ndarray   # float[n, n_slots, 2], NaN where a slot is empty
+    players_speed: np.ndarray
     slot_team: np.ndarray    # str[n_slots]: 'H' / 'A' / '?'
     tags: list = field(default_factory=list)   # Smart Tagging, added in task 1.7
 
@@ -99,6 +101,9 @@ def parse_raw(raw_path, n_frames, n_slots, pitch):
     ball = np.full((n_frames, 2), np.nan)
     players = np.full((n_frames, n_slots, 2), np.nan)
 
+    ball_speed = np.full(n_frames, np.nan)
+    players_speed = np.full((n_frames, n_slots), np.nan)
+
     with open(raw_path) as handle:
         for line in handle:
             parts = line.rstrip("\n").split(FIELD_SEP)
@@ -110,8 +115,9 @@ def parse_raw(raw_path, n_frames, n_slots, pitch):
 
             group = parts[2]
             if group and group[0] != MISSING:
-                x, y = group.split(",", 2)[:2]
+                x, y, s = group.split(",", 2)
                 ball[row] = float(x), float(y)
+                ball_speed[row] = float(s)
 
             groups = parts[1].split(GROUP_SEP)
             if len(groups) != n_slots:
@@ -121,11 +127,12 @@ def parse_raw(raw_path, n_frames, n_slots, pitch):
                 )
             for slot, group in enumerate(groups):
                 if group and group[0] != MISSING:
-                    x, y = group.split(",", 2)[:2]
+                    x, y, s = group.split(",", 2)
                     players[row, slot] = float(x), float(y)
+                    players_speed[row, slot] = float(s)
 
     scale = np.array([length, width])
-    return ball * scale, players * scale
+    return ball * scale, players * scale, ball_speed, players_speed
 
 
 def _cache_path(root, game, meta_path, raw_path, n_frames):
@@ -153,19 +160,22 @@ def load_match(game=games.GAME, n_frames=None, use_cache=True):
 
     if cache is not None and cache.is_file():
         with np.load(cache) as stored:
-            ball_xy, players_xy = stored["ball_xy"], stored["players_xy"]
+            ball_xy, ball_speed, players_xy, players_speed = stored["ball_xy"], stored["ball_speed"], stored["players_xy"], stored["players_speed"]
     else:
-        ball_xy, players_xy = parse_raw(raw_path, n, len(slot_team), info["pitch"])
+        ball_xy, players_xy, ball_speed, players_speed = parse_raw(raw_path, n, len(slot_team), info["pitch"])
         if cache is not None:
             cache.parent.mkdir(exist_ok=True)
-            np.savez(cache, ball_xy=ball_xy, players_xy=players_xy)
+            np.savez(cache, ball_xy=ball_xy, players_xy=players_xy,
+                     ball_speed=ball_speed, players_speed=players_speed)
 
     return Match(
         n_frames=n,
         fps=float(info["fps"]),
         period=period_of_frames(n, game),
         ball_xy=ball_xy,
+        ball_speed= ball_speed,
         players_xy=players_xy,
+        players_speed=players_speed,
         slot_team=slot_team,
     )
 
@@ -177,10 +187,13 @@ def summary(match):
         "n_frames": match.n_frames,
         "fps": match.fps,
         "ball_xy": match.ball_xy.shape,
+        "ball_speed": match.ball_speed.shape,
         "players_xy": match.players_xy.shape,
+        "players_speed": match.players_speed.shape,
         "slots_H": int(np.sum(match.slot_team == "H")),
         "slots_A": int(np.sum(match.slot_team == "A")),
         "frames_period_1": int(np.sum(match.period == 1)),
         "frames_period_2": int(np.sum(match.period == 2)),
         "ball_seen_pct": round(100.0 * float(ball_seen.mean()), 1) if match.n_frames else 0.0,
     }
+
