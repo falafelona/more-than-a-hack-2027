@@ -1,3 +1,7 @@
 # Runtime dependencies, EXACT versions (==), including transitive ones.
-# Reproduction must give the identical file, so versions change only via a chore/ PR.
-# Planned: numpy, pandas, PyYAML (+ their dependencies). Tooling choice still open: D10.
+# Reproduction must give the identical file, so versions change only via a chore/ PR (D10).
+numpy==2.5.4
+pandas==3.1.1
+python-dateutil==4.0.0
+PyYAML==6.0.3
+tzdata==2026.6

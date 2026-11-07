@@ -1,2 +1,17 @@
 # The configuration we submit. Frozen on Sat 14 Nov (tag v1.0-freeze).
 # Starts as a copy of baseline.yaml; changes only via a PR with a row in experiments/RESULTS.md.
+seed: 0
+
+ball:
+  method: none            # no gap filling, no rejection
+
+deadball:
+  method: ball_missing    # score 1 wherever the ball is not observed, else 0
+
+possession:
+  method: nearest_majority
+  window: 50              # centred majority vote over +/- 50 frames
+  dead_threshold: 0.5     # frames with dead score >= this give no team vote
+
+output:
+  x_policy: none          # D14 still proposed: no X written yet

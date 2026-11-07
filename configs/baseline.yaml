@@ -1,7 +1,17 @@
-# Config that reproduces the official baseline_smooth50 (spellF1 0.2433 on the full match).
-# Compare our output with the organisers' published file to prove the pipeline is correct.
-#
-# Will contain:
-#   ball:       method none             (no gap filling)
-#   deadball:   method ball_missing     (D wherever the ball is not observed)
-#   possession: method nearest_majority, window 50   (majority vote over +/- 50 frames)
+# Reproduces the official baseline_smooth50 (full-match spellF1 0.2433, macroF1 0.6724).
+# Compare our output with the organisers' baseline_smooth50.csv to prove the pipeline is correct.
+seed: 0
+
+ball:
+  method: none            # no gap filling, no rejection
+
+deadball:
+  method: ball_missing    # score 1 wherever the ball is not observed, else 0
+
+possession:
+  method: nearest_majority
+  window: 50              # centred majority vote over +/- 50 frames
+  dead_threshold: 0.5     # frames with dead score >= this give no team vote
+
+output:
+  x_policy: none          # D14 still proposed: no X written yet
