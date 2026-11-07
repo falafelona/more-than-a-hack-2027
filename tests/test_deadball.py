@@ -2,9 +2,12 @@
 import pytest
 
 from falafelona import deadball, io
+from falafelona.config import load_config
 
-BALL_MISSING = {"deadball": {"method": "ball_missing"}}
-OUT_OF_BOUNDS = {"deadball": {"method": "out_of_bounds", "out_margin": 1.0}}
+# Read the real config files, so the tests break if a config stops working.
+CONFIGS = io.vendor.REPO_ROOT / "configs"
+BALL_MISSING = load_config(CONFIGS / "baseline.yaml")
+OUT_OF_BOUNDS = load_config(CONFIGS / "exp" / "dead-out-of-bounds.yaml")
 
 
 def test_ball_missing_marks_the_gap_as_dead(bundle):

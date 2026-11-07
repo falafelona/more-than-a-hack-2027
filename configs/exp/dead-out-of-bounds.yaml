@@ -1,0 +1,18 @@
+# Experiment: dead ball = ball past a pitch line (task 3.4). Copy of baseline.yaml, only `deadball:` changed.
+# Not a replacement for ball_missing: a missing ball scores 0 here. The two get combined later (task 3.6).
+seed: 0
+
+ball:
+  method: none            # no gap filling, no rejection
+
+deadball:
+  method: out_of_bounds   # score 1 where the ball is clearly past a touchline or goal line, else 0
+  out_margin: 1.0         # metres past the line before we call it out (tracking is noisy near the lines)
+
+possession:
+  method: nearest_majority
+  window: 50              # centred majority vote over +/- 50 frames
+  dead_threshold: 0.5     # frames with dead score >= this give no team vote
+
+output:
+  x_policy: none          # D14 still proposed: no X written yet
