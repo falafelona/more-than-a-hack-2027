@@ -13,7 +13,7 @@
 # Methods are selected via the `possession:` section of the config.
 from io import Match
 
-class Possession():
+class Possession:
 
     def __init__(self, data: Match):
         self.data = data
