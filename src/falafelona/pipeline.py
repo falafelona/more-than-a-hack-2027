@@ -6,3 +6,14 @@
 #
 # Must be deterministic: fixed seeds from the config, no order-dependent parallelism.
 # Will also compute the SHA-256 of the written file and aggregate label counts (safe to print).
+
+
+from io import load_match
+from ball import DataCleaner
+from possession import Possession
+
+raw_match_data = load_match()
+data_cleaner = DataCleaner(raw_match_data)
+cleaned_data = data_cleaner.return_cleaned_data()
+possession_calc = Possession(cleaned_data)
+

@@ -11,3 +11,9 @@
 # - official baseline smoothing: centred majority vote over +/- 50 frames (spellF1 0.2433)
 #
 # Methods are selected via the `possession:` section of the config.
+from io import Match
+
+class Possession():
+
+    def __init__(self, data: Match):
+        self.data = data
