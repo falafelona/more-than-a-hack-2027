@@ -11,3 +11,12 @@
 # - official baseline smoothing: centred majority vote over +/- 50 frames (spellF1 0.2433)
 #
 # Methods are selected via the `possession:` section of the config.
+
+from falafelona.io import Match
+
+
+class Possession:
+    """Turns the cleaned data into H / A / D per frame (PR #9 structure). Task 4.1, Dudu."""
+
+    def __init__(self, data: Match):
+        self.data = data
