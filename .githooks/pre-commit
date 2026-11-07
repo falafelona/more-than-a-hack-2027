@@ -2,5 +2,10 @@
 # Pre-commit hook: runs scripts/check_no_data.py on every staged file and blocks the commit if
 # any of them looks like match data, is larger than 5 MB, or is a notebook with outputs.
 #
-# Enable once per clone (make setup will do this):
+# Enable once per clone (make setup does this):
 #   git config core.hooksPath .githooks
+
+PY=.venv/bin/python
+[ -x "$PY" ] || PY=python3
+
+git diff --cached --name-only --diff-filter=ACMR -z | xargs -0 "$PY" scripts/check_no_data.py

@@ -38,6 +38,7 @@ __all__ = [
     "CHALLENGE_DIR",
     "EVALUATION_DIR",
     "OFFICIAL_BASELINE",
+    "REPO_ROOT",
     "VALIDATOR",
     "games",
     "possession_metrics",

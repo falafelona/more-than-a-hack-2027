@@ -1,0 +1,36 @@
+# Runs on every push and PR: the no-data guard on changed files, then lint and tests.
+# Tests use synthetic data only; CI never has the match data.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: No match data in this change
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          git diff --name-only --diff-filter=ACMR -z "$base" HEAD \
+            | xargs -0 --no-run-if-empty python scripts/check_no_data.py
+
+      - name: Setup
+        run: make setup PYTHON=python
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
