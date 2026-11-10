@@ -31,6 +31,8 @@ class DeadBall:
             return self.out_of_bounds()
         elif method == "ball_missing":
             return self.ball_missing()
+        elif method == "players_still":
+            return self.players_still()
         raise ValueError(f"unknown deadball method : {method}")
         
 
@@ -53,7 +55,34 @@ class DeadBall:
         past_top_touchline = ball_y > width + margin
         out = past_bottom_touchline | past_far_goal_line | past_near_goal_line | past_top_touchline
         out = out.astype(float)
-        return out 
+        return out
+
+    def players_still(self):
+        """1.0 where the players' average speed stays below still_speed for still_seconds, else 0.0."""
+        threshold = self.cfg["still_speed"]
+        min_frames = round(self.cfg["still_seconds"] * self.data.fps)   # seconds -> frames
+        speeds = self.data.players_speed               # one row per frame, one column per player slot
+        average = np.nanmean(speeds, axis=1)           # one average per frame, empty slots skipped
+        still = average < threshold
+        still = keep_long_stretches(still, min_frames) # a short slow moment is not a stoppage
+        still = still.astype(float)
+        return still
+
+
+def keep_long_stretches(flags, min_frames):
+    """Keep only the stretches of True that last at least min_frames frames in a row."""
+    kept = np.zeros(len(flags), dtype=bool)
+    start = None                                       # where the current stretch of True began
+    for frame, flag in enumerate(flags):
+        if flag and start is None:                     # a stretch begins
+            start = frame
+        elif not flag and start is not None:           # a stretch ends: keep it if long enough
+            if frame - start >= min_frames:
+                kept[start:frame] = True
+            start = None
+    if start is not None and len(flags) - start >= min_frames:   # a stretch still open at the end
+        kept[start:] = True
+    return kept
 
         
 def detect(match, ball, cfg):

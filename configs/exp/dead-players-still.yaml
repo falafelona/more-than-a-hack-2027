@@ -1,0 +1,19 @@
+# Experiment: dead ball = players barely moving for a while (task 3.5). Copy of baseline.yaml, only `deadball:` changed.
+# Not a replacement for ball_missing: the methods get combined later (task 3.6).
+seed: 0
+
+ball:
+  method: none            # no gap filling, no rejection
+
+deadball:
+  method: players_still   # score 1 where the players' average speed stays low for a while, else 0
+  still_speed: 1.0        # m/s, a bit slower than walking pace. A guess until tuned on other matches (D15)
+  still_seconds: 3        # how long it must stay slow; a shorter slow moment happens in live play too
+
+possession:
+  method: nearest_majority
+  window: 50              # centred majority vote over +/- 50 frames
+  dead_threshold: 0.5     # frames with dead score >= this give no team vote
+
+output:
+  x_policy: none          # D14 still proposed: no X written yet
