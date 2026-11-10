@@ -16,7 +16,9 @@
 #   none    the raw track, unchanged (the baseline, task 2.2)
 #   reject  throws away false detections: impossible jumps and a ball far from every player
 #           (#19, task 2.3)
-# To add another (#30 interpolate, #35 kalman), write the function and add one line to METHODS.
+#   interpolate  fills short gaps with a straight line between the last and the next seen
+#           ball (#30, task 2.4). Can run `reject` first.
+# To add another (#35 kalman), write the function and add one line to METHODS.
 #
 # NOTE: no `from __future__ import annotations` here. tests/test_pipeline.py checks that
 # DataCleaner.__init__.__annotations__["raw_data"] is Match, and that needs a real object,
@@ -89,10 +91,10 @@ def _none(match, cfg):
 _CHUNK_FRAMES = 20_000  # frames per block in the player check; only keeps memory use small
 
 
-def _number(section, key, *, allow_zero=False):
+def _number(section, key, *, allow_zero=False, method="reject"):
     """One number from the config, checked to be finite and positive (or zero if allowed)."""
     if key not in section:
-        raise ValueError(f"ball method 'reject' needs {key!r} in the ball section of the config")
+        raise ValueError(f"ball method {method!r} needs {key!r} in the ball section of the config")
     value = float(section[key])
     if not np.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
         kind = "zero or more" if allow_zero else "more than zero"
@@ -249,10 +251,101 @@ def _reject(match, cfg):
     return BallTrack(xy=xy, source=source, speed=speed)
 
 
+# ---------------------------------------------------------------------------------------------
+# Method `interpolate` (#30): fill short gaps
+#
+# A gap is a run of frames with no ball, with a seen ball on both sides. If it is short, the
+# ball is put on the straight line between the last seen position before the gap and the first
+# one after it, at equal steps in time. Filled frames get source = INTERPOLATED. A long gap is
+# left alone (NaN), so the dead-ball stage still sees it as a missing ball.
+#
+#   max_gap        longest gap to fill, in seconds. Required.
+#   max_speed      optional, in m/s. A gap is only filled if the ball could really have gone
+#   speed_slack    from one end to the other: distance <= max_speed * seconds + speed_slack.
+#                  Otherwise a straight line would invent a path the ball cannot have taken.
+#                  speed_slack (m, zero allowed) is required when max_speed is given.
+#   reject_first   optional, true or false (default false). Run method `reject` first, with
+#                  its own keys (see above), so that rejected false detections become gaps
+#                  that can be filled. Needs those keys, including max_false_run when
+#                  max_speed is given.
+#
+# A gap is never filled across the edge of a half, or from the start or end of the data (the
+# ball is only known on one side there). The ball speed field is filled the same way, as a
+# straight line between the two ends (NaN if either end has none).
+# ---------------------------------------------------------------------------------------------
+
+
+def _interpolate_settings(section):
+    """The settings of method `interpolate`, read from cfg["ball"] and checked."""
+    settings = {"max_gap": _number(section, "max_gap", method="interpolate")}
+    settings["max_speed"] = settings["slack"] = None
+    if "max_speed" in section:
+        settings["max_speed"] = _number(section, "max_speed", method="interpolate")
+        settings["slack"] = _number(section, "speed_slack", allow_zero=True, method="interpolate")
+    reject_first = section.get("reject_first", False)
+    if reject_first is not True and reject_first is not False:
+        raise ValueError(f"ball.reject_first must be true or false, got {reject_first!r}")
+    settings["reject_first"] = reject_first
+    return settings
+
+
+def _gaps(xy, period):
+    """The gaps that have a seen ball on both sides and do not cross the edge of a half.
+
+    Returns (before, after): for each gap, the frame number of the last seen frame before it
+    and of the first seen frame after it. The gap itself is the frames in between.
+    """
+    missing = np.isnan(xy).any(axis=1)
+    padded = np.concatenate(([False], missing, [False]))
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    starts, ends = edges[0::2], edges[1::2]  # a gap is frames starts[k]:ends[k]
+    inside = (starts > 0) & (ends < len(xy))  # a seen frame exists on both sides
+    starts, ends = starts[inside], ends[inside]
+    before, after = starts - 1, ends
+    changes = np.concatenate(([0], np.cumsum(np.diff(period) != 0)))  # how often period changed
+    one_half = (changes[after] == changes[before]) & (period[before] != 0)
+    return before[one_half], after[one_half]
+
+
+def _fill(track, period, fps, settings):
+    """A new BallTrack with the short gaps of `track` filled in. `track` is not changed."""
+    before, after = _gaps(track.xy, period)
+    length = after - before - 1  # frames in each gap
+    keep = length <= np.floor(settings["max_gap"] * fps + 1e-9)
+    if settings["max_speed"] is not None:
+        distance = np.hypot(*(track.xy[after] - track.xy[before]).T)
+        seconds = (after - before) / fps
+        keep &= distance <= settings["max_speed"] * seconds + settings["slack"]
+    before, after, length = before[keep], after[keep], length[keep]
+
+    xy, speed, source = track.xy.copy(), track.speed.copy(), track.source.copy()
+    if len(before) == 0:
+        return BallTrack(xy=xy, source=source, speed=speed)
+    gap_of = np.repeat(np.arange(len(before)), length)  # which gap each filled frame is in
+    first = np.cumsum(length) - length
+    step = np.arange(length.sum()) - first[gap_of] + 1  # 1, 2, ... inside each gap
+    frames = before[gap_of] + step
+    t = (step / (after - before)[gap_of])[:, None]  # how far along the line, 0..1
+    xy[frames] = track.xy[before[gap_of]] * (1 - t) + track.xy[after[gap_of]] * t
+    speed[frames] = (
+        track.speed[before[gap_of]] * (1 - t[:, 0]) + track.speed[after[gap_of]] * t[:, 0]
+    )  # NaN if either end has no speed
+    source[frames] = INTERPOLATED
+    return BallTrack(xy=xy, source=source, speed=speed)
+
+
+def _interpolate(match, cfg):
+    """Method `interpolate`: short gaps get a straight line, long gaps stay NaN."""
+    settings = _interpolate_settings(cfg["ball"])
+    track = _reject(match, cfg) if settings["reject_first"] else _none(match, cfg)
+    return _fill(track, match.period, match.fps, settings)
+
+
 # method name in configs/*.yaml -> function(match, cfg) -> BallTrack
 METHODS = {
     "none": _none,
     "reject": _reject,
+    "interpolate": _interpolate,
 }
 
 
