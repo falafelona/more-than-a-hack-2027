@@ -1,0 +1,20 @@
+# Experiment: Viterbi decoder with a switch cost instead of the majority vote (task 4.3).
+# Copy of baseline.yaml, only `possession:` changed. D is placed exactly like the baseline
+# (dead_margin = the baseline's window), so the only change is how the team is decoded.
+# switch_cost is a PLACEHOLDER. Choose it on other matches (D15), never on this one.
+seed: 0
+
+ball:
+  method: none            # no gap filling, no rejection
+
+deadball:
+  method: ball_missing    # score 1 wherever the ball is not observed, else 0
+
+possession:
+  method: switch_cost
+  switch_cost: 25         # frames of net evidence for the other team needed to switch (1 s)
+  dead_margin: 50         # D where no team evidence within +/- this many frames (= baseline)
+  dead_threshold: 0.5     # frames with dead score >= this give no team evidence
+
+output:
+  x_policy: none          # D14 still proposed: no X written yet
