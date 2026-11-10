@@ -26,15 +26,30 @@ class DeadBall:
 
     def score(self):
         """Run the method named in the config."""
-        method = self.cfg["method"]
+        return self.run(self.cfg["method"])
+
+    def run(self, method):
+        """Run one method by its name."""
         if method == "out_of_bounds":
             return self.out_of_bounds()
         elif method == "ball_missing":
             return self.ball_missing()
         elif method == "players_still":
             return self.players_still()
+        elif method == "combined":
+            return self.combined()
         raise ValueError(f"unknown deadball method : {method}")
-        
+
+    def combined(self):
+        """Each clue adds its weight where it fires. The total is capped at 1."""
+        total = np.zeros(self.data.n_frames)            # start every frame at 0 points
+        for method, weight in self.cfg["weights"].items():
+            if method == "combined":                    # would call itself forever
+                raise ValueError("combined cannot be one of its own weights")
+            total = total + weight * self.run(method)   # a clue adds its weight where it is 1
+        total = np.minimum(total, 1.0)                  # never above 1
+        return total
+
 
     def ball_missing(self):
         """Official baseline: dead (1.0) wherever the ball is not seen, alive (0.0) otherwise."""
