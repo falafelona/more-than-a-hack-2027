@@ -23,7 +23,13 @@ Match:
   ball_xy: float[n, 2]         # metres, NaN where missing
   players_xy: float[n, 46, 2]  # metres, NaN where slot empty
   slot_team: str[46]           # 'H' / 'A' / '?'  (slots are tracklets, not players)
-  tags: list[Event]            # Smart Tagging: start, end, type, team ('H' / 'A' / None)
+  tags: list[Event]            # Smart Tagging, sorted: start, end (exclusive), code, type,
+                               #   team ('H' / 'A' / None for N/A), half; evidence, not truth
+  homography: float[n, 3, 3]   # normalised pitch (0-1) -> pixels; divide metres by pitch first
+  homography_error: float[n]   # reprojection error, lower is better
+  homography_valid: bool[n]    # matrix is NaN where False
+
+select_tags(tags, code=, type=, team=) -> list[Event]  # code/type case-insensitive
 
 # ball.py
 clean(match, cfg) -> BallTrack:

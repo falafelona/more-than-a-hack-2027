@@ -75,3 +75,51 @@ def test_import_reads_no_data():
         env=env, capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+# --- Smart Tagging and homography (task 1.7) ---
+
+def test_tags_in_submission_rows(bundle):
+    match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
+    got = [(e.start, e.end, e.code, e.type, e.team, e.half) for e in match.tags]
+    assert got == [
+        (0, 50, "SET PIECES", "Kick Off (Start)", "H", 1),
+        (50, 160, "BUILD UP", None, "H", 1),
+        (200, 225, "SET PIECES", "Throw-in", None, 1),    # Team N/A -> None
+        (250, 350, "Progression", None, "A", 1),           # "ATLETIC CLUB" matched
+        (450, 500, "SET PIECES", "Kick Off (Start)", "A", 2),  # clipped to n_frames
+    ]                                                      # the tag after the end is dropped
+
+
+def test_select_tags_is_case_insensitive(bundle):
+    match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
+    kickoffs = io.select_tags(match.tags, code="set pieces", type="KICK OFF (START)")
+    assert [e.half for e in kickoffs] == [1, 2]
+    assert [e.code for e in io.select_tags(match.tags, team="A")] == ["Progression", "SET PIECES"]
+
+
+def test_unknown_club_names_raise(bundle, monkeypatch):
+    monkeypatch.setitem(io.TAG_TEAMS, vendor.games.GAME, {"real madrid": "H"})
+    with pytest.raises(ValueError, match="maps to H or A"):
+        io.load_match(n_frames=bundle["n_frames"], use_cache=False)
+
+
+def test_homography_row_i_is_frame_i(bundle):
+    match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
+    assert match.homography.shape == (500, 3, 3)
+    np.testing.assert_allclose(match.homography, bundle["homography"], equal_nan=True)
+    np.testing.assert_allclose(match.homography_error, bundle["homography_error"])
+    np.testing.assert_array_equal(match.homography_valid, bundle["homography_valid"])
+    assert np.isnan(match.homography[~match.homography_valid]).all()
+
+
+def test_homography_shorter_than_n_frames_raises(bundle):
+    with pytest.raises(ValueError, match="expected frames"):
+        io.load_match(n_frames=bundle["n_frames"] + 1, use_cache=False)
+
+
+def test_summary_counts_tags_and_homography(bundle):
+    summary = io.summary(io.load_match(n_frames=bundle["n_frames"], use_cache=False))
+    assert (summary["tags"], summary["tags_H"], summary["tags_A"], summary["tags_no_team"]) \
+        == (5, 2, 2, 1)
+    assert summary["homography_valid_pct"] == 98.0

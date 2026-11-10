@@ -19,6 +19,8 @@ EVALUATION_DIR = CHALLENGE_DIR / "evaluation"
 # Official scripts, run as-is (e.g. by `make validate`).
 VALIDATOR = EVALUATION_DIR / "validate_submission.py"
 OFFICIAL_BASELINE = CHALLENGE_DIR / "starter" / "baseline.py"
+OFFICIAL_SMART_TAGGING = CHALLENGE_DIR / "starter" / "load_smart_tagging.py"
+OFFICIAL_HOMOGRAPHY = CHALLENGE_DIR / "starter" / "load_homography.py"
 
 if not (CHALLENGE_DIR / "games.py").is_file():
     raise ImportError(
@@ -35,29 +37,36 @@ import games
 import possession_metrics
 
 
-def _load_baseline():
-    """starter/baseline.py as a module. It is a script, not a package, so it is loaded by path.
+def _load_script(name, path):
+    """An official starter script as a module. Scripts are not a package, so they load by path.
 
-    Importing it only defines functions: its __main__ block, which reads the data, does not run.
+    Importing one only defines functions: its __main__ block, which reads the data, does not run.
     """
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("official_baseline", OFFICIAL_BASELINE)
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
 # The organisers' reference baseline. We use its write_submission so our CSV format is theirs.
-baseline = _load_baseline()
+baseline = _load_script("official_baseline", OFFICIAL_BASELINE)
+# The organisers' Smart Tagging and homography readers, used by io.py (task 1.7).
+smart_tagging = _load_script("official_load_smart_tagging", OFFICIAL_SMART_TAGGING)
+homography = _load_script("official_load_homography", OFFICIAL_HOMOGRAPHY)
 
 __all__ = [
     "CHALLENGE_DIR",
     "EVALUATION_DIR",
     "OFFICIAL_BASELINE",
+    "OFFICIAL_HOMOGRAPHY",
+    "OFFICIAL_SMART_TAGGING",
     "REPO_ROOT",
     "VALIDATOR",
     "baseline",
     "games",
+    "homography",
     "possession_metrics",
+    "smart_tagging",
 ]
