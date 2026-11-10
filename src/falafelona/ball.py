@@ -12,8 +12,11 @@
 #   clean(match, cfg)       -> BallTrack(xy, source, speed)   (the interface in architecture.md)
 #   DataCleaner(match, cfg) -> .return_cleaned_data() is a Match (what pipeline.py passes on)
 #
-# Every method is a function (match, cfg) -> BallTrack registered in METHODS. To add one
-# (#19 reject, #30 interpolate, #35 kalman), write the function and add one line to METHODS.
+# Every method is a function (match, cfg) -> BallTrack registered in METHODS. Methods so far:
+#   none    the raw track, unchanged (the baseline, task 2.2)
+#   reject  throws away false detections: impossible jumps and a ball far from every player
+#           (#19, task 2.3)
+# To add another (#30 interpolate, #35 kalman), write the function and add one line to METHODS.
 #
 # NOTE: no `from __future__ import annotations` here. tests/test_pipeline.py checks that
 # DataCleaner.__init__.__annotations__["raw_data"] is Match, and that needs a real object,
@@ -57,9 +60,199 @@ def _none(match, cfg):
     return BallTrack(xy=xy, source=source, speed=match.ball_speed.copy())
 
 
+# ---------------------------------------------------------------------------------------------
+# Method `reject` (#19): throw away false detections
+#
+# Two checks. Each one is switched on by its keys in the `ball:` section of the config, and
+# stays off when its keys are absent. No threshold is written in this file.
+#
+#   speed check    max_speed (m/s), speed_slack (m), max_false_run (s)
+#       A ball cannot move faster than max_speed. If two consecutive seen frames are further
+#       apart than max_speed * (seconds between them) + speed_slack, the track has jumped.
+#       The jumps and the gaps cut the track into stretches. We keep the chain of stretches that
+#       connects (the move from the end of one to the start of the next is possible) and holds
+#       the most frames. A short stretch that does not fit the chain is a false detection, and
+#       is rejected. A stretch longer than max_false_run seconds is never rejected: too long to
+#       be a blip. Time between frames counts, so a ball that comes back far away after a gap is
+#       fine.
+#
+#   player check   max_player_distance (m), and optionally min_players (default 1)
+#       A ball inside the pitch that is further than max_player_distance from every tracked
+#       player is rejected. Frames where fewer than min_players players are tracked are not
+#       judged. A ball outside the pitch is never judged here: it is the evidence that the
+#       dead-ball stage (deadball.py, out_of_bounds) works with.
+#
+# A rejected frame gets xy = NaN and source = REJECTED. Later stages that read match.ball_xy
+# see it as a missing ball.
+# ---------------------------------------------------------------------------------------------
+
+_CHUNK_FRAMES = 20_000  # frames per block in the player check; only keeps memory use small
+
+
+def _number(section, key, *, allow_zero=False):
+    """One number from the config, checked to be finite and positive (or zero if allowed)."""
+    if key not in section:
+        raise ValueError(f"ball method 'reject' needs {key!r} in the ball section of the config")
+    value = float(section[key])
+    if not np.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
+        kind = "zero or more" if allow_zero else "more than zero"
+        raise ValueError(f"ball.{key} must be a number {kind}, got {section[key]!r}")
+    return value
+
+
+def _reject_settings(section):
+    """The thresholds of method `reject`, read from cfg["ball"] and checked.
+
+    Returns (speed, player). Each is a dict of settings, or None when that check is off.
+    """
+    speed = player = None
+    if "max_speed" in section:
+        speed = {
+            "max_speed": _number(section, "max_speed"),
+            "slack": _number(section, "speed_slack", allow_zero=True),
+            "max_false_run": _number(section, "max_false_run"),
+        }
+    if "max_player_distance" in section:
+        min_players = section.get("min_players", 1)
+        if isinstance(min_players, bool) or not isinstance(min_players, int) or min_players < 1:
+            raise ValueError(
+                f"ball.min_players must be a whole number of 1 or more, got {min_players!r}"
+            )
+        player = {
+            "max_distance": _number(section, "max_player_distance"),
+            "min_players": min_players,
+        }
+    if speed is None and player is None:
+        raise ValueError(
+            "ball method 'reject' does nothing without 'max_speed' and/or 'max_player_distance' "
+            "in the ball section of the config (use method 'none' to leave the track alone)"
+        )
+    return speed, player
+
+
+def _far_from_players(match, max_distance, min_players):
+    """bool[n]: the ball is inside the pitch, enough players are tracked, and the nearest one is
+    further than max_distance."""
+    far = np.zeros(match.n_frames, dtype=bool)
+    if match.players_xy.shape[1] == 0:
+        return far
+    length, width = match.pitch
+    ball = match.ball_xy
+    inside = (
+        (ball[:, 0] >= 0) & (ball[:, 0] <= length) & (ball[:, 1] >= 0) & (ball[:, 1] <= width)
+    )  # False where the ball is missing (NaN compares False)
+    candidates = np.flatnonzero(inside)
+    for lo in range(0, len(candidates), _CHUNK_FRAMES):
+        rows = candidates[lo : lo + _CHUNK_FRAMES]
+        offset = match.players_xy[rows] - ball[rows, None, :]  # [rows, slots, 2]
+        dist = np.hypot(offset[..., 0], offset[..., 1])  # NaN where a slot is empty
+        tracked = ~np.isnan(dist)
+        nearest = np.where(tracked, dist, np.inf).min(axis=1)
+        far[rows] = (tracked.sum(axis=1) >= min_players) & (nearest > max_distance)
+    return far
+
+
+def _stretches(frames, pos, fps, max_speed, slack):
+    """Cut the seen frames into stretches: runs of frames in a row, with no jump inside.
+
+    frames: the seen frame numbers, increasing. pos: float[m, 2], their positions in metres.
+    A stretch ends where a frame is missing, or where the ball jumps: a move between two
+    consecutive seen frames longer than max_speed * seconds + slack.
+    Stretch k is frames[starts[k]:ends[k]].
+
+    Cutting at missing frames matters. After a gap the ball could be anywhere, so a fake first
+    frame after a gap would otherwise be glued to the real ball from before the gap.
+    """
+    moved = np.hypot(*np.diff(pos, axis=0).T)
+    spacing = np.diff(frames)
+    allowed = max_speed * spacing / fps + slack
+    breaks = np.flatnonzero((moved > allowed) | (spacing > 1)) + 1
+    return np.concatenate(([0], breaks)), np.concatenate((breaks, [len(frames)]))
+
+
+def _best_chain(
+    first_frame, last_frame, first_pos, last_pos, count, protected, fps, max_speed, slack
+):
+    """Which stretches to keep: the most seen frames in one chain that never jumps.
+
+    Stretch k runs from first_frame[k] (at first_pos[k]) to last_frame[k] (at last_pos[k]) and has
+    count[k] seen frames. Two kept stretches that follow each other must connect: the move from
+    the end of one to the start of the next is no longer than max_speed * seconds + slack.
+    Stretches marked `protected` are always kept (two protected stretches that follow each other
+    need not connect). Everything else is dropped if that lets the chain keep more frames.
+    Returns the indices of the kept stretches, increasing.
+    """
+    n_stretches = len(count)
+    best = np.full(n_stretches, -np.inf)  # most frames in a chain that ends at stretch k
+    parent = np.full(n_stretches, -1)  # the stretch before k in that chain; -1 = chain starts at k
+    last_protected = -1
+    for k in range(n_stretches):
+        # a protected stretch before k cannot be skipped, so the chain must come through it
+        earlier = np.arange(max(last_protected, 0), k)
+        value_if_start = 0.0 if last_protected < 0 else -np.inf
+        best_before, before = -np.inf, -1
+        if earlier.size:
+            seconds = (first_frame[k] - last_frame[earlier]) / fps
+            moved = np.hypot(*(first_pos[k] - last_pos[earlier]).T)
+            connects = moved <= max_speed * seconds + slack
+            if protected[k]:
+                connects |= protected[earlier]
+            options = np.where(connects, best[earlier], -np.inf)
+            pick = int(np.argmax(options))
+            best_before, before = options[pick], int(earlier[pick])
+        if best_before > value_if_start:
+            best[k], parent[k] = count[k] + best_before, before
+        elif value_if_start > -np.inf:
+            best[k], parent[k] = count[k] + value_if_start, -1
+        if protected[k]:
+            last_protected = k
+    # the chain cannot end before a protected stretch
+    ends = np.where(np.arange(n_stretches) >= last_protected, best, -np.inf)
+    kept, k = [], int(np.argmax(ends))
+    while k >= 0:
+        kept.append(k)
+        k = int(parent[k])
+    return np.array(kept[::-1], dtype=int)
+
+
+def _speed_check(xy, frames, fps, max_speed, slack, max_false_run):
+    """The frame numbers, among the seen `frames`, that the speed check rejects."""
+    if len(frames) < 2:
+        return frames[:0]
+    pos = xy[frames]
+    starts, ends = _stretches(frames, pos, fps, max_speed, slack)
+    first, last = frames[starts], frames[ends - 1]
+    protected = (last - first + 1) > max_false_run * fps
+    kept = _best_chain(
+        first, last, pos[starts], pos[ends - 1], ends - starts, protected, fps, max_speed, slack
+    )
+    dropped = np.ones(len(starts), dtype=bool)
+    dropped[kept] = False
+    return frames[np.repeat(dropped, ends - starts)]
+
+
+def _reject(match, cfg):
+    """Method `reject`: false detections become NaN and are marked REJECTED."""
+    speed_cfg, player_cfg = _reject_settings(cfg["ball"])
+    xy = match.ball_xy.copy()
+    seen = ~np.isnan(xy).any(axis=1)
+    rejected = np.zeros(len(xy), dtype=bool)
+    if player_cfg is not None:
+        rejected |= _far_from_players(match, **player_cfg)
+    if speed_cfg is not None:
+        frames = np.flatnonzero(seen & ~rejected)  # the player check already removed some
+        rejected[_speed_check(xy, frames, match.fps, **speed_cfg)] = True
+    xy[rejected] = np.nan
+    speed = match.ball_speed.copy()
+    speed[rejected] = np.nan
+    source = np.where(seen, np.where(rejected, REJECTED, OBSERVED), UNKNOWN).astype(np.int8)
+    return BallTrack(xy=xy, source=source, speed=speed)
+
+
 # method name in configs/*.yaml -> function(match, cfg) -> BallTrack
 METHODS = {
     "none": _none,
+    "reject": _reject,
 }
 
 

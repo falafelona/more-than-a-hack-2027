@@ -1,0 +1,22 @@
+# Experiment: throw away false ball detections (task 2.3, issue #19). Copy of baseline.yaml, only `ball:` changed.
+# The numbers below are PLACEHOLDERS. Choose them on other matches (D15), never on this one.
+# A check stays off when its keys are removed. Key meanings: see "Method `reject`" in src/falafelona/ball.py.
+seed: 0
+
+ball:
+  method: reject
+  max_speed: 40.0           # m/s: a ball cannot move faster than this between two seen frames
+  speed_slack: 1.0          # m: tracking noise allowed on top of max_speed * time
+  max_false_run: 2.0        # s: a stretch of track longer than this is never rejected as a blip
+  max_player_distance: 40.0 # m: a ball inside the pitch this far from every tracked player is rejected
+
+deadball:
+  method: ball_missing    # score 1 wherever the ball is not observed, else 0 (a rejected ball counts as missing)
+
+possession:
+  method: nearest_majority
+  window: 50              # centred majority vote over +/- 50 frames
+  dead_threshold: 0.5     # frames with dead score >= this give no team vote
+
+output:
+  x_policy: none          # D14 still proposed: no X written yet
