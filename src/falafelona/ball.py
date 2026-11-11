@@ -18,7 +18,9 @@
 #           (#19, task 2.3)
 #   interpolate  fills short gaps with a straight line between the last and the next seen
 #           ball (#30, task 2.4). Can run `reject` first.
-# To add another (#35 kalman), write the function and add one line to METHODS.
+#   kalman  fills gaps with a Kalman filter and RTS smoother (constant-velocity model), and
+#           only where the model is still sure enough (#35, task 2.5). Can run `reject` first.
+# To add another, write the function and add one line to METHODS.
 #
 # NOTE: no `from __future__ import annotations` here. tests/test_pipeline.py checks that
 # DataCleaner.__init__.__annotations__["raw_data"] is Match, and that needs a real object,
@@ -341,11 +343,181 @@ def _interpolate(match, cfg):
     return _fill(track, match.period, match.fps, settings)
 
 
+# ---------------------------------------------------------------------------------------------
+# Method `kalman` (#35): fill gaps with a Kalman filter and RTS smoother
+#
+# The ball is modelled as moving at a steady velocity that is pushed around by random
+# accelerations (a kick is an acceleration). The filter walks forward through each half, and
+# the RTS smoother walks back, so the estimate inside a gap uses the balls seen on BOTH sides,
+# and the speed the ball had when it left and when it came back: the path can curve, where
+# `interpolate` draws a straight line. The smoother also says how sure it is. Its standard
+# deviation grows towards the middle of a gap. A gap is filled only if the model is still
+# sure enough everywhere inside it (sigma <= max_sigma): the model, not a fixed time, decides
+# how long a gap may be. Observed frames are never changed. Filled frames get
+# source = INTERPOLATED; a gap that is not filled stays NaN, so the dead-ball stage still sees
+# a missing ball. Never filled across the edge of a half, or from the start or end of the data.
+#
+#   process_noise       std of the random acceleration, in m/s^2. Required. Larger: the path may
+#                       bend more, and the model becomes unsure sooner.
+#   measurement_noise   std of the tracked position, in m. Required.
+#   initial_speed_std   std of the speed of the ball before its first sighting of a half, in
+#                       m/s. Required.
+#   max_sigma           a gap is filled only where the smoothed position std is at most this, in
+#                       m. Required. Note the whole gap must pass: no half-filled gaps.
+#   max_speed           optional, as in `interpolate`: do not fill a gap if the ball could not
+#   speed_slack         have crossed it this fast. speed_slack is required with max_speed.
+#   reject_first        optional, true or false, as in `interpolate`: run `reject` first.
+#
+# The ball speed field is filled with a straight line between the two ends, as `interpolate`
+# does, so it stays in the unit of the field. x and y are filtered independently with the same
+# model, so the covariance does not depend on the values: it is computed once per frame.
+# ---------------------------------------------------------------------------------------------
+
+
+def _kalman_settings(section):
+    """The settings of method `kalman`, read from cfg[\"ball\"] and checked."""
+    settings = {
+        "q": _number(section, "process_noise", method="kalman"),
+        "r": _number(section, "measurement_noise", method="kalman"),
+        "v0": _number(section, "initial_speed_std", method="kalman"),
+        "max_sigma": _number(section, "max_sigma", method="kalman"),
+        "max_speed": None,
+        "slack": None,
+    }
+    if "max_speed" in section:
+        settings["max_speed"] = _number(section, "max_speed", method="kalman")
+        settings["slack"] = _number(section, "speed_slack", allow_zero=True, method="kalman")
+    reject_first = section.get("reject_first", False)
+    if reject_first is not True and reject_first is not False:
+        raise ValueError(f"ball.reject_first must be true or false, got {reject_first!r}")
+    settings["reject_first"] = reject_first
+    return settings
+
+
+def _smooth_run(z, observed, dt, q, r, v0):
+    """Kalman filter and RTS smoother over one run of frames.
+
+    z: float[m, 2] positions, only read where `observed` (bool[m]) is True. The run starts and
+    ends on an observed frame. State per axis: position and velocity, constant velocity model
+    with white acceleration noise of std q, position noise of std r, and a start velocity of
+    std v0. Returns (xy, sigma): the smoothed positions float[m, 2] and the smoothed position
+    std float[m] (the same for x and y).
+
+    Written out as plain 2x2 algebra, one frame at a time. tests/test_ball_kalman.py checks it
+    against the same filter built from matrices.
+    """
+    m = len(z)
+    r2, q2 = r * r, q * q
+    qpp, qpv, qvv = q2 * dt**4 / 4.0, q2 * dt**3 / 2.0, q2 * dt * dt
+    zx, zy = z[:, 0].tolist(), z[:, 1].tolist()
+    obs = observed.tolist()
+
+    # filtered state and covariance of every frame, and the predictions they came from
+    fx, fvx, fy, fvy = [0.0] * m, [0.0] * m, [0.0] * m, [0.0] * m
+    fa, fb, fc = [0.0] * m, [0.0] * m, [0.0] * m
+    px_, pvx_, py_, pvy_ = [0.0] * m, [0.0] * m, [0.0] * m, [0.0] * m
+    pa_, pb_, pc_ = [0.0] * m, [0.0] * m, [0.0] * m
+
+    x, vx, y, vy = zx[0], 0.0, zy[0], 0.0
+    a, b, c = r2, 0.0, v0 * v0
+    fx[0], fvx[0], fy[0], fvy[0], fa[0], fb[0], fc[0] = x, vx, y, vy, a, b, c
+    for t in range(1, m):
+        x_p, y_p = x + dt * vx, y + dt * vy  # velocity stays what it was
+        a_p = a + 2.0 * dt * b + dt * dt * c + qpp
+        b_p = b + dt * c + qpv
+        c_p = c + qvv
+        px_[t], pvx_[t], py_[t], pvy_[t] = x_p, vx, y_p, vy
+        pa_[t], pb_[t], pc_[t] = a_p, b_p, c_p
+        if obs[t]:
+            s = a_p + r2
+            k0, k1 = a_p / s, b_p / s
+            ix, iy = zx[t] - x_p, zy[t] - y_p
+            x, y = x_p + k0 * ix, y_p + k0 * iy
+            vx, vy = vx + k1 * ix, vy + k1 * iy
+            a, b, c = a_p - k0 * a_p, b_p - k0 * b_p, c_p - k1 * b_p
+        else:
+            x, y, a, b, c = x_p, y_p, a_p, b_p, c_p
+        fx[t], fvx[t], fy[t], fvy[t], fa[t], fb[t], fc[t] = x, vx, y, vy, a, b, c
+
+    # backward pass (Rauch-Tung-Striebel): the last frame is already smoothed
+    sx, svx, sy, svy = fx[:], fvx[:], fy[:], fvy[:]
+    sa, sb, sc = fa[:], fb[:], fc[:]
+    for t in range(m - 2, -1, -1):
+        a_t, b_t, c_t = fa[t], fb[t], fc[t]
+        a_n, b_n, c_n = pa_[t + 1], pb_[t + 1], pc_[t + 1]
+        det = a_n * c_n - b_n * b_n
+        m00, m01, m10, m11 = a_t + dt * b_t, b_t, b_t + dt * c_t, c_t  # P_t F^T
+        g00 = (m00 * c_n - m01 * b_n) / det  # smoother gain: P_t F^T inverse(P_next)
+        g01 = (m01 * a_n - m00 * b_n) / det
+        g10 = (m10 * c_n - m11 * b_n) / det
+        g11 = (m11 * a_n - m10 * b_n) / det
+        ex, evx = sx[t + 1] - px_[t + 1], svx[t + 1] - pvx_[t + 1]
+        ey, evy = sy[t + 1] - py_[t + 1], svy[t + 1] - pvy_[t + 1]
+        sx[t], svx[t] = fx[t] + g00 * ex + g01 * evx, fvx[t] + g10 * ex + g11 * evx
+        sy[t], svy[t] = fy[t] + g00 * ey + g01 * evy, fvy[t] + g10 * ey + g11 * evy
+        d0, d1, d2 = sa[t + 1] - a_n, sb[t + 1] - b_n, sc[t + 1] - c_n
+        e00, e01 = g00 * d0 + g01 * d1, g00 * d1 + g01 * d2
+        e10, e11 = g10 * d0 + g11 * d1, g10 * d1 + g11 * d2
+        sa[t] = a_t + e00 * g00 + e01 * g01
+        sb[t] = b_t + e00 * g10 + e01 * g11
+        sc[t] = c_t + e10 * g10 + e11 * g11
+    return np.column_stack([sx, sy]), np.sqrt(np.maximum(sa, 0.0))
+
+
+def _period_runs(period):
+    """[(start, stop)] of each stretch of equal period that is graded (period 1 or 2)."""
+    changes = np.flatnonzero(np.diff(period) != 0) + 1
+    starts = np.concatenate(([0], changes))
+    stops = np.concatenate((changes, [len(period)]))
+    return [(int(a), int(b)) for a, b in zip(starts, stops) if period[a] != 0]
+
+
+def _kalman(match, cfg):
+    """Method `kalman`: gaps the smoother is sure about are filled, the rest stay NaN."""
+    settings = _kalman_settings(cfg["ball"])
+    track = _reject(match, cfg) if settings["reject_first"] else _none(match, cfg)
+    xy, speed, source = track.xy.copy(), track.speed.copy(), track.source.copy()
+    before, after = _gaps(track.xy, match.period)
+    if len(before) == 0:
+        return BallTrack(xy=xy, source=source, speed=speed)
+
+    seen = ~np.isnan(track.xy).any(axis=1)
+    estimate = np.full_like(track.xy, np.nan)
+    sigma = np.full(len(xy), np.nan)
+    for start, stop in _period_runs(match.period):
+        frames = np.flatnonzero(seen[start:stop]) + start
+        if len(frames) < 2:
+            continue
+        lo, hi = int(frames[0]), int(frames[-1]) + 1  # first to last seen frame of the stretch
+        estimate[lo:hi], sigma[lo:hi] = _smooth_run(
+            track.xy[lo:hi], seen[lo:hi], 1.0 / match.fps,
+            settings["q"], settings["r"], settings["v0"],
+        )
+
+    keep = np.array(
+        [np.all(sigma[b + 1 : a] <= settings["max_sigma"]) for b, a in zip(before, after)],
+        dtype=bool,
+    )
+    if settings["max_speed"] is not None:
+        distance = np.hypot(*(track.xy[after] - track.xy[before]).T)
+        seconds = (after - before) / match.fps
+        keep &= distance <= settings["max_speed"] * seconds + settings["slack"]
+    before, after = before[keep], after[keep]
+    for b, a in zip(before, after):
+        frames = np.arange(b + 1, a)
+        t = (frames - b) / (a - b)
+        xy[frames] = estimate[frames]
+        speed[frames] = track.speed[b] * (1 - t) + track.speed[a] * t  # NaN if an end has none
+        source[frames] = INTERPOLATED
+    return BallTrack(xy=xy, source=source, speed=speed)
+
+
 # method name in configs/*.yaml -> function(match, cfg) -> BallTrack
 METHODS = {
     "none": _none,
     "reject": _reject,
     "interpolate": _interpolate,
+    "kalman": _kalman,
 }
 
 
