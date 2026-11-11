@@ -39,6 +39,8 @@ class DeadBall:
             return self.players_still()
         elif method == "before_kickoff":
             return self.before_kickoff()
+        elif method == "before_restart":
+            return self.before_restart()
         elif method == "combined":
             return self.combined()
         raise ValueError(f"unknown deadball method : {method}")
@@ -97,6 +99,16 @@ class DeadBall:
         before = (self.data.period == 2) & (frames < kickoff)
         before = before.astype(float)
         return before
+
+    def before_restart(self):
+        """1.0 in the seconds before each restart tag (throw-in, corner, ...), else 0.0."""
+        dead = np.zeros(self.data.n_frames)
+        for restart, seconds in self.cfg["restart_seconds"].items():
+            frames = round(seconds * self.data.fps)             # seconds -> frames
+            for tag in select_tags(self.data.tags, type=restart):
+                first = max(tag.start - frames, 0)              # not before the first frame
+                dead[first:tag.start] = 1.0                     # dead until the restart is taken
+        return dead
 
 
 def keep_long_stretches(flags, min_frames):

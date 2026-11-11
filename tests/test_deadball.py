@@ -122,6 +122,25 @@ def test_before_kickoff_without_a_tag_gives_no_evidence(bundle):
     assert (score == 0).all()
 
 
+def test_before_restart_marks_the_wait_before_a_throw_in(bundle):
+    # The fake match has one throw-in tag. Kickoff tags are not in the list, so they are ignored.
+    match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
+    throw_in = next(tag.start for tag in match.tags if tag.type == "Throw-in")
+    cfg = {"deadball": {"method": "before_restart", "restart_seconds": {"throw-in": 2}}}
+    score = deadball.detect(match, None, cfg)
+    wait = 2 * 25                               # 2 s at 25 frames per second
+
+    # one score per frame
+    assert len(score) == match.n_frames
+    # the 2 s before the throw: dead
+    assert (score[throw_in - wait:throw_in] == 1).all()
+    # just before that wait, and from the throw on: alive
+    assert score[throw_in - wait - 1] == 0
+    assert score[throw_in] == 0
+    # nothing else is dead (the kickoff tags are ignored)
+    assert score.sum() == wait
+
+
 def test_unknown_method_is_rejected(bundle):
     match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
     with pytest.raises(ValueError):
