@@ -94,6 +94,34 @@ def test_combined_adds_up_the_clues(bundle):
     assert score.max() <= 1.0
 
 
+def test_before_kickoff_marks_the_second_half_wait_as_dead(bundle):
+    # The fake match has no graded halves (period is all 0), so we make our own.
+    match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
+    kickoff = next(tag.start for tag in match.tags
+                   if tag.type == "Kick Off (Start)" and tag.half == 2)
+    graded_from = kickoff - 50                  # the second half is graded 2 s before its kickoff
+    match.period[:graded_from - 100] = 1        # first half
+    match.period[graded_from:] = 2              # second half
+    score = deadball.detect(match, None, {"deadball": {"method": "before_kickoff"}})
+
+    # one score per frame
+    assert len(score) == match.n_frames
+    # graded but before the kickoff: dead
+    assert (score[graded_from:kickoff] == 1).all()
+    # from the kickoff on: alive
+    assert (score[kickoff:] == 0).all()
+    # the first half and the break are not touched
+    assert (score[:graded_from] == 0).all()
+
+
+def test_before_kickoff_without_a_tag_gives_no_evidence(bundle):
+    match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
+    match.period[:] = 2
+    match.tags = []
+    score = deadball.detect(match, None, {"deadball": {"method": "before_kickoff"}})
+    assert (score == 0).all()
+
+
 def test_unknown_method_is_rejected(bundle):
     match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
     with pytest.raises(ValueError):

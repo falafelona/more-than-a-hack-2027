@@ -9,6 +9,7 @@ ball:
 deadball:
   method: combined
   weights:
+    before_kickoff: 1.0   # certain: graded second-half frames before its kickoff are always dead
     out_of_bounds: 1.0    # strongest clue: enough on its own
     players_still: 0.4    # not enough alone: a visible ball in play means alive. Dead with ball_missing
     ball_missing: 0.3     # weak: the ball also goes missing in live play. Needs another clue

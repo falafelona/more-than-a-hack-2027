@@ -13,6 +13,7 @@
 # Methods are selected via the `deadball:` section of the config.
 import numpy as np
 
+from falafelona.io import select_tags
 from falafelona.vendor import games
 
 
@@ -36,6 +37,8 @@ class DeadBall:
             return self.ball_missing()
         elif method == "players_still":
             return self.players_still()
+        elif method == "before_kickoff":
+            return self.before_kickoff()
         elif method == "combined":
             return self.combined()
         raise ValueError(f"unknown deadball method : {method}")
@@ -82,6 +85,18 @@ class DeadBall:
         still = keep_long_stretches(still, min_frames) # a short slow moment is not a stoppage
         still = still.astype(float)
         return still
+
+    def before_kickoff(self):
+        """1.0 on graded second-half frames before the second-half kickoff, else 0.0."""
+        kickoffs = select_tags(self.data.tags, code="set pieces", type="kick off (start)")
+        second_half = [tag for tag in kickoffs if tag.half == 2]
+        if not second_half:                            # no kickoff tag: no evidence either way
+            return np.zeros(self.data.n_frames)
+        kickoff = second_half[0].start                 # the frame the second half kicks off
+        frames = np.arange(self.data.n_frames)         # 0, 1, 2, ... one number per frame
+        before = (self.data.period == 2) & (frames < kickoff)
+        before = before.astype(float)
+        return before
 
 
 def keep_long_stretches(flags, min_frames):
