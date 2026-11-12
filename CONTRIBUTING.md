@@ -32,7 +32,7 @@ If you forgot the flag: `git submodule update --init`.
 - Branch from `main` as `<type>/<ws>-<short-desc>`, e.g. `feat/ball-gap-fill`.
   - Types: `feat` `exp` `fix` `docs` `chore`
   - Workstreams: `int` `ball` `dead` `poss` `eval`
-- Open a PR. It needs one review, then squash-merge.
+- Run `make check` (lint and tests), then open a PR. It needs one review, then squash-merge.
 - After the freeze on 14 Nov, only `fix` and `docs` PRs.
 
 ## Code rules
