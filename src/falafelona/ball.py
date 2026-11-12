@@ -357,8 +357,11 @@ def _interpolate(match, cfg):
 # source = INTERPOLATED; a gap that is not filled stays NaN, so the dead-ball stage still sees
 # a missing ball. Never filled across the edge of a half, or from the start or end of the data.
 #
-#   process_noise       std of the random acceleration, in m/s^2. Required. Larger: the path may
-#                       bend more, and the model becomes unsure sooner.
+#   process_noise       how fast the ball's velocity wanders, in m/s per sqrt(s): in t seconds
+#                       the velocity changes by about process_noise * sqrt(t) (white acceleration
+#                       noise, continuous time). Required. Larger: the path may bend more, and
+#                       the model becomes unsure sooner. Because it is per second, not per frame,
+#                       the same value gives the same uncertainty at any frame rate.
 #   measurement_noise   std of the tracked position, in m. Required.
 #   initial_speed_std   std of the speed of the ball before its first sighting of a half, in
 #                       m/s. Required.
@@ -371,6 +374,15 @@ def _interpolate(match, cfg):
 # The ball speed field is filled with a straight line between the two ends, as `interpolate`
 # does, so it stays in the unit of the field. x and y are filtered independently with the same
 # model, so the covariance does not depend on the values: it is computed once per frame.
+#
+# Two things to know when choosing the settings:
+#   - max_sigma is, in practice, a limit on the gap length: sigma depends on how long the gap
+#     is and on the settings, not on where the ball was (a little on how many sightings
+#     surround the gap: fewer sightings, larger sigma). configs/exp/ball-kalman.yaml says which
+#     length its max_sigma allows. A gap that is filled counts as a ball in play for the
+#     dead-ball stage, so choose it by the dead-ball result, not only by the ball error.
+#   - A filled frame next to an observed one comes from the smoothed path, not from the
+#     observation, so the track can step by up to about measurement_noise there.
 # ---------------------------------------------------------------------------------------------
 
 
@@ -399,8 +411,9 @@ def _smooth_run(z, observed, dt, q, r, v0):
 
     z: float[m, 2] positions, only read where `observed` (bool[m]) is True. The run starts and
     ends on an observed frame. State per axis: position and velocity, constant velocity model
-    with white acceleration noise of std q, position noise of std r, and a start velocity of
-    std v0. Returns (xy, sigma): the smoothed positions float[m, 2] and the smoothed position
+    with continuous-time white acceleration noise (velocity wanders by q * sqrt(seconds)),
+    position noise of std r, and a start velocity of std v0. dt is the time between frames in
+    seconds. Returns (xy, sigma): the smoothed positions float[m, 2] and the smoothed position
     std float[m] (the same for x and y).
 
     Written out as plain 2x2 algebra, one frame at a time. tests/test_ball_kalman.py checks it
@@ -408,7 +421,7 @@ def _smooth_run(z, observed, dt, q, r, v0):
     """
     m = len(z)
     r2, q2 = r * r, q * q
-    qpp, qpv, qvv = q2 * dt**4 / 4.0, q2 * dt**3 / 2.0, q2 * dt * dt
+    qpp, qpv, qvv = q2 * dt**3 / 3.0, q2 * dt**2 / 2.0, q2 * dt  # noise added in one step
     zx, zy = z[:, 0].tolist(), z[:, 1].tolist()
     obs = observed.tolist()
 

@@ -1,15 +1,23 @@
 # Experiment: fill gaps in the ball track with a Kalman filter and RTS smoother (task 2.5, issue #35).
-# Copy of baseline.yaml, only `ball:` changed.
+# Copy of baseline.yaml, only `ball:` changed. Fills gaps up to about 1.9 s (compare ball-interpolate.yaml: 0.5 s).
+# ball-kalman-short.yaml is the same with the 0.5 s limit of interpolate, to tell "better path" from "longer fills".
 # The numbers below are PLACEHOLDERS. Choose them on other matches (D15), never on this one.
 # Key meanings: see "Method `kalman`" in src/falafelona/ball.py.
 seed: 0
 
 ball:
   method: kalman
-  process_noise: 8.0      # m/s^2: std of the random acceleration (a kick is one). Larger: the path may bend more
+  process_noise: 6.4      # m/s per sqrt(s): the ball's velocity wanders by about this * sqrt(seconds). Per second, so frame rate does not matter
   measurement_noise: 0.3  # m: std of a tracked ball position
   initial_speed_std: 15.0 # m/s: std of the ball's speed before its first sighting of a half
-  max_sigma: 2.0          # m: fill a gap only if the smoothed position std stays below this everywhere in it
+  # max_sigma is in practice a limit on the gap length. With the settings above and the ball seen on both
+  # sides of the gap (25 fps), the longest gap that is filled is:
+  #   max_sigma 0.33 m -> 0.5 s (12 frames)    max_sigma 1.0 m -> 1.4 s (34 frames)
+  #   max_sigma 0.5 m  -> 0.8 s (19 frames)    max_sigma 1.5 m -> 1.9 s (47 frames)
+  #   max_sigma 3.0 m  -> 3.2 s (80 frames)    max_sigma 5.0 m -> 4.6 s (115 frames)
+  # Tune it by the dead-ball result too: every filled frame counts as "ball in play" for the dead-ball
+  # stage, so a limit that is too generous turns dead-ball frames into live ones.
+  max_sigma: 1.5          # m: fill a gap only if the smoothed position std stays below this everywhere in it
   max_speed: 40.0         # m/s: do not fill a gap if the ball could not have crossed it this fast
   speed_slack: 1.0        # m: tracking noise allowed on top of max_speed * time
 

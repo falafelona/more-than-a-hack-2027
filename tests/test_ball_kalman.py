@@ -31,7 +31,7 @@ PITCH = vendor.games.GAMES[vendor.games.GAME]["pitch"]
 DT = 1 / 25
 
 BASE = {
-    "process_noise": 8.0,
+    "process_noise": 1.6,
     "measurement_noise": 0.3,
     "initial_speed_std": 15.0,
     "max_sigma": 2.0,
@@ -98,7 +98,7 @@ def dense_smoother(z, observed, dt, q, r, v0):
     """The same filter and smoother as ball._smooth_run, written with 2x2 matrices, per axis."""
     m = len(z)
     f = np.array([[1.0, dt], [0.0, 1.0]])
-    qm = q * q * np.array([[dt**4 / 4, dt**3 / 2], [dt**3 / 2, dt**2]])
+    qm = q * q * np.array([[dt**3 / 3, dt**2 / 2], [dt**2 / 2, dt]])
     h = np.array([[1.0, 0.0]])
     out = np.zeros((m, 2))
     sigma = None
@@ -171,42 +171,32 @@ def test_a_longer_gap_is_less_certain():
     assert long_ > short
 
 
-def test_the_smoother_is_the_exact_answer_to_the_model_it_describes():
-    """Check the model, not only the algebra, by plain Gaussian conditioning on one axis.
+def test_the_model_does_not_depend_on_how_finely_time_is_cut():
+    """Check the model, not only the algebra: the noise is per second, not per frame.
 
-    The model: every frame the ball gets a fresh random acceleration a_k of std q. Then
-        x_t = x_0 + v_0 t dt + dt^2 * sum_{k<t} (t - k - 1/2) a_k.
-    x_0 and v_0 start with std r and v0. The ball is seen with noise r on some frames. The
-    posterior of every x_t given the seen frames is a Gaussian we can write down with one
-    matrix; the smoother must give the same mean and std. (dense_smoother above shares the
-    noise matrix with the code, this does not.)
+    Take the same ball and cut each frame into 5 smaller time steps, with no ball seen on the
+    in-between steps. If the noise is really continuous in time, the smoother gives the same
+    answer on the original frames. (dense_smoother above shares the noise matrix with the code;
+    this check does not, and a noise matrix that mixes up per frame and per second fails it.)
     """
     rng = np.random.default_rng(7)
-    m, q, r, v0 = 80, 5.0, 0.4, 10.0
+    m, q, r, v0, cut = 80, 3.0, 0.4, 10.0, 5
     observed = np.ones(m, dtype=bool)
     observed[20:45] = False
     observed[60:63] = False
-    path = np.cumsum(rng.normal(0.0, 0.3, m)) + 20.0
-    z = np.where(observed, path, np.nan)
+    z = np.cumsum(rng.normal(0.0, 0.3, size=(m, 2)), axis=0) + [20.0, 30.0]
+    z = np.where(observed[:, None], z, np.nan)
 
-    t = np.arange(m)
-    a_part = np.zeros((m, m - 1))
-    for k in range(m - 1):
-        a_part[k + 1 :, k] = DT**2 * (t[k + 1 :] - k - 0.5)
-    design = np.hstack([np.ones((m, 1)), (t * DT)[:, None], a_part])    # x = design @ [x0, v0, a]
-    prior = np.diag([r * r, v0 * v0, *([q * q] * (m - 1))])
-    seen = np.flatnonzero(observed)[1:]                                  # frame 0 only sets x_0
-    prior_mean = np.zeros(m + 1)
-    prior_mean[0] = z[0]
-    h = design[seen]
-    gain = prior @ h.T @ np.linalg.inv(h @ prior @ h.T + r * r * np.eye(len(seen)))
-    mean = design @ (prior_mean + gain @ (z[seen] - h @ prior_mean))
-    cov = design @ (prior - gain @ h @ prior) @ design.T
+    fine_len = (m - 1) * cut + 1
+    fine_z = np.full((fine_len, 2), np.nan)
+    fine_seen = np.zeros(fine_len, dtype=bool)
+    fine_z[::cut], fine_seen[::cut] = z, observed
 
-    got_xy, got_sigma = ball._smooth_run(np.column_stack([z, z]), observed, DT, q, r, v0)
+    coarse_xy, coarse_sigma = ball._smooth_run(z, observed, DT, q, r, v0)
+    fine_xy, fine_sigma = ball._smooth_run(fine_z, fine_seen, DT / cut, q, r, v0)
 
-    np.testing.assert_allclose(got_xy[:, 0], mean, atol=1e-6)
-    np.testing.assert_allclose(got_sigma, np.sqrt(np.diag(cov)), atol=1e-6)
+    np.testing.assert_allclose(coarse_xy, fine_xy[::cut], atol=1e-6)
+    np.testing.assert_allclose(coarse_sigma, fine_sigma[::cut], atol=1e-6)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -218,7 +208,7 @@ def test_a_ball_at_steady_speed_is_filled_exactly():
     """A straight walk: the smoother finds the straight line (up to the small measurement noise)."""
     truth = walk(100)
     xy = blank(truth, (40, 50))
-    track = clean(match_from(xy), cfg(measurement_noise=0.001, process_noise=0.5))
+    track = clean(match_from(xy), cfg(measurement_noise=0.001, process_noise=0.1))
 
     assert (frames_with(track, INTERPOLATED) == np.arange(40, 50)).all()
     np.testing.assert_allclose(track.xy[40:50], truth[40:50], atol=2e-3)
@@ -235,7 +225,7 @@ def test_a_curved_path_is_filled_far_better_than_a_straight_line():
     gap = (50, 70)
     xy = blank(truth, gap)
 
-    kalman = clean(match_from(xy), cfg(measurement_noise=0.05, process_noise=1.0, max_sigma=5.0))
+    kalman = clean(match_from(xy), cfg(measurement_noise=0.05, process_noise=0.2, max_sigma=5.0))
     linear = clean(match_from(xy), {"ball": {"method": "interpolate", "max_gap": 1.0}})
 
     kalman_error = np.abs(kalman.xy[gap[0] : gap[1]] - truth[gap[0] : gap[1]]).max()
@@ -338,6 +328,17 @@ def test_the_frame_rate_sets_the_time_step_of_the_model():
     assert (at_25.source[50:90] == UNKNOWN).all()
 
 
+@pytest.mark.parametrize("fps", [10.0, 50.0])
+def test_the_same_gap_in_seconds_is_about_as_uncertain_at_any_frame_rate(fps):
+    """A 2 s gap: the std peak is about the same at 10, 25 and 50 fps (it was not before)."""
+    def peak(rate):
+        n = int(rate * 6)
+        xy = blank(walk(n), (int(rate * 2), int(rate * 4)))
+        return sigma_of(xy, dt=1 / rate)[int(rate * 2) : int(rate * 4)].max()
+
+    assert peak(fps) == pytest.approx(peak(25.0), rel=0.15)
+
+
 def test_a_gap_just_before_the_last_seen_frame_uses_that_frame():
     """The ball is seen again at frame 59 and then never: that last sighting still counts.
 
@@ -348,7 +349,7 @@ def test_a_gap_just_before_the_last_seen_frame_uses_that_frame():
     xy = blank(truth, (45, 59))
     xy[60:] = np.nan
 
-    track = clean(match_from(xy), cfg(measurement_noise=0.05, process_noise=8.0, max_sigma=5.0))
+    track = clean(match_from(xy), cfg(measurement_noise=0.05, process_noise=1.6, max_sigma=5.0))
 
     assert (track.source[45:59] == INTERPOLATED).all()
     np.testing.assert_allclose(track.xy[45:59], truth[45:59], atol=0.2)   # without it: 1.3 m off
@@ -356,8 +357,8 @@ def test_a_gap_just_before_the_last_seen_frame_uses_that_frame():
 
 def test_a_larger_process_noise_makes_the_model_less_sure_so_fewer_gaps_are_filled():
     xy = blank(walk(300), (50, 70), (150, 250))      # a 0.8 s gap and a 4 s gap
-    calm = clean(match_from(xy), cfg(process_noise=1.0, max_sigma=1.5))
-    wild = clean(match_from(xy), cfg(process_noise=20.0, max_sigma=1.5))
+    calm = clean(match_from(xy), cfg(process_noise=0.2, max_sigma=1.5))
+    wild = clean(match_from(xy), cfg(process_noise=4.0, max_sigma=1.5))
 
     assert len(frames_with(calm, INTERPOLATED)) == 120   # both gaps
     assert len(frames_with(wild, INTERPOLATED)) == 20    # only the short one
@@ -413,7 +414,7 @@ def test_the_two_halves_are_smoothed_separately():
     xy = np.vstack([first, second])
     period = np.array([1] * 60 + [2] * 60)
 
-    track = clean(match_from(xy, period=period), cfg(measurement_noise=0.001, process_noise=0.5))
+    track = clean(match_from(xy, period=period), cfg(measurement_noise=0.001, process_noise=0.1))
 
     np.testing.assert_allclose(track.xy[80:84], walk(60, start=(90.0, 10.0))[20:24], atol=2e-3)
     np.testing.assert_allclose(track.xy[20:24], walk(60)[20:24], atol=2e-3)
@@ -593,6 +594,35 @@ def test_the_experiment_config_loads_and_runs(bundle):
     # the fake match has no graded half, so nothing may be filled
     assert (track.source[gap_start:gap_stop] == UNKNOWN).all()
     assert (track.source[:gap_start] == OBSERVED).all()
+
+
+@pytest.mark.parametrize(
+    "name, longest",
+    [
+        ("ball-kalman.yaml", 47),                    # 1.9 s at 25 fps, as the yaml comments say
+        ("ball-kalman-short.yaml", 12),              # 0.5 s: the same limit as ball-interpolate.yaml
+    ],
+)
+def test_the_experiment_configs_fill_the_gap_length_their_comments_promise(name, longest):
+    config = load_config(CONFIGS / "exp" / name)
+    xy = blank(walk(400), (50, 50 + longest), (200, 200 + longest + 1))
+
+    track = clean(match_from(xy), config)
+
+    assert (track.source[50 : 50 + longest] == INTERPOLATED).all()
+    assert (track.source[200 : 200 + longest + 1] == UNKNOWN).all()
+
+
+def test_the_short_config_differs_from_the_long_one_only_in_max_sigma():
+    long_ = load_config(CONFIGS / "exp" / "ball-kalman.yaml")
+    short = load_config(CONFIGS / "exp" / "ball-kalman-short.yaml")
+
+    assert {k: v for k, v in long_["ball"].items() if k != "max_sigma"} == {
+        k: v for k, v in short["ball"].items() if k != "max_sigma"
+    }
+    assert short["ball"]["max_sigma"] < long_["ball"]["max_sigma"]
+    for section in ("deadball", "possession", "output", "seed"):
+        assert long_[section] == short[section]
 
 
 def test_baseline_and_final_configs_still_use_the_untouched_ball():
