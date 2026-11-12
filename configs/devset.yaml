@@ -12,8 +12,8 @@ matches:                  # the seven full matches of the open IDSSE release
   - J03WN1
   - J03WOH
   - J03WOY
-  - J03WPF
-  - J03WQF
+  - J03WQQ
+  - J03WR9
 
 # The ball of IDSSE is almost complete, ours is not. These numbers make the dev ball look like
 # ours. They come from the ball EDA of OUR match (scripts/ball_eda.py, issue #13): copy them from
