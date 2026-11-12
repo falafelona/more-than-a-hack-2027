@@ -33,7 +33,8 @@ If you forgot the flag: `git submodule update --init`.
   - Types: `feat` `exp` `fix` `docs` `chore`
   - Workstreams: `int` `ball` `dead` `poss` `eval`
 - Run `make check` (lint and tests), then open a PR. It needs one review, then squash-merge.
-- After the freeze on 14 Nov, only `fix` and `docs` PRs.
+- Deadline: Tue 17 Nov 23:59 CET (organisers). The team freezes the code on Sun 15 or Mon 16 Nov;
+  after that, only `fix` and `docs` PRs.
 
 ## Code rules
 

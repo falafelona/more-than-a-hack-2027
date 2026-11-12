@@ -1,4 +1,5 @@
-# The configuration we submit. Frozen on Sat 14 Nov (tag v1.0-freeze).
+# The configuration we submit. Organisers' deadline: Tue 17 Nov 23:59 CET. The team locks it on
+# Sun 15 or Mon 16 Nov (tag v1.0-freeze).
 # Starts as a copy of baseline.yaml; changes only via a PR with a row in experiments/RESULTS.md.
 seed: 0
 
