@@ -1,10 +1,11 @@
-# ws:eval: tests for scripts/bootstrap_eval.py (tasks 5.1, 5.2). Synthetic data only.
+# ws:eval: tests for scripts/bootstrap_eval.py (tasks 5.1, 5.2, 5.3). Synthetic data only.
 #
 # Every file here is made up inside a temporary folder: no match data, no public answers file.
 # Safe for anyone, for CI and for AI tools (CLAUDE.md).
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace as Tag
 
 import numpy as np
 import pytest
@@ -52,3 +53,22 @@ def test_main_runs_and_rejects_bad_files(tmp_path, capsys):
     short = write_csv(tmp_path / "short.csv", truth[:-1])  # one row missing
     with pytest.raises(SystemExit):
         be.main([str(short), "--gt", str(gt)])
+
+
+def test_possessions_per_minute():
+    labels = np.array(list("HHHHAAAADDDD") * 125)  # 1500 frames = 1 minute, 250 possessions
+    graded = np.ones(len(labels), dtype=np.int8)
+    assert be.possessions_per_minute(labels, graded) == 250.0
+    assert be.possessions_per_minute(labels, np.zeros(len(labels), dtype=np.int8)) is None
+
+
+def test_tag_agreement():
+    labels = np.array(["H"] * 8 + ["A"] * 2 + ["D"] * 5)
+    tags = [
+        Tag(code="BUILD UP", team="H", start=0, end=10),            # 8 of 10 frames agree
+        Tag(code="DEFENDING IN MIDDLE THIRD", team="A", start=0, end=10),  # skipped: defending
+        Tag(code="PROGRESSION", team=None, start=0, end=10),        # skipped: no team
+        Tag(code="Build Up", team="H", start=10, end=15),           # only D frames: skipped
+    ]
+    assert be.tag_agreement(labels, tags) == 0.8
+    assert be.tag_agreement(labels, []) is None
