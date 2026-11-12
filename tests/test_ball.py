@@ -126,7 +126,7 @@ def test_baseline_config_hands_back_the_same_match(match):
 
 @pytest.mark.parametrize("name", ["baseline.yaml", "final.yaml"])
 def test_shipped_configs_name_a_method_that_exists(name):
-    """baseline.yaml and final.yaml both say `ball: method: none`. That name must be registered."""
+    """The ball method named in baseline.yaml and final.yaml must be registered."""
     cfg = load_config(CONFIGS / name)
 
     assert cfg["ball"]["method"] in METHODS
