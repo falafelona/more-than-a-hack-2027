@@ -7,7 +7,7 @@
 #   - a pipeline with a complete ball must score 1.0, so the scoring path is right
 #   - cutting gaps must hurt the baseline, and a cleaning method must win some of it back, so
 #     the harness can tell methods apart
-#   - the report must show totals only
+#   - the report must show the mean over matches and every match on its own, aggregates only
 
 import importlib.util
 from dataclasses import replace
@@ -542,6 +542,9 @@ def test_a_complete_ball_gives_a_perfect_score(idsse, tmp_path):
     assert np.array_equal(labels[graded], dev.truth[graded])
     assert score["spellF1"] == pytest.approx(1.0) and score["macroF1"] == pytest.approx(1.0)
     assert score["truth_possessions"] == score["our_possessions"] > 5
+    assert score["spell_precision"] == pytest.approx(1.0)
+    assert score["spell_recall"] == pytest.approx(1.0)
+    assert score["latency_mean"] == pytest.approx(0.0)        # every switch exactly on time
 
 
 def test_score_labels_returns_plain_numbers_and_counts_possessions():
@@ -549,9 +552,22 @@ def test_score_labels_returns_plain_numbers_and_counts_possessions():
     labels = np.array(list("HHHHDDAAHH"))
     score = devset.score_labels(truth, labels)
 
-    assert set(score) == {"spellF1", "macroF1", "truth_possessions", "our_possessions"}
+    headline = {"spellF1", "macroF1", "truth_possessions", "our_possessions"}
+    breakdown = {"spell_precision", "spell_recall", "alive_dead_f1", "team_acc",
+                 "trans_f1_tight", "trans_f1_loose", "latency_mean"}
+    assert headline | breakdown <= set(score)
+    assert "spell_ci_low" not in score                        # no bootstrap unless asked for
     assert score["truth_possessions"] == 2 and score["our_possessions"] == 3
+    assert score["count_error"] == 1 and score["spell_spurious"] >= 1
     assert all(type(v) in (int, float) for v in score.values())
+
+
+def test_score_labels_adds_the_bootstrap_interval_when_asked():
+    truth = np.array(list("HHHHDDAAAA"))
+    labels = np.array(list("HHHHDDAAHH"))
+    score = devset.score_labels(truth, labels, bootstrap_n=50)
+
+    assert 0.0 <= score["spell_ci_low"] <= score["spell_ci_high"] <= 1.0
 
 
 def test_gaps_hurt_the_baseline_and_interpolation_wins_some_back(idsse, tmp_path):
@@ -601,13 +617,62 @@ def test_every_config_sees_the_same_degraded_ball(idsse, tmp_path, monkeypatch):
     real = devset.predict_labels
     monkeypatch.setattr(
         devset, "predict_labels",
-        lambda match, cfg: seen.append(match.ball_xy.copy()) or real(match, cfg),
+        lambda match, cfg, *rest: seen.append(match.ball_xy.copy()) or real(match, cfg, *rest),
     )
     dev_cfg = {"seed": 0, "matches": ["J03WTEST"], "degrade": SHORT_GAPS}
 
     devset.run_devset({"a": pipeline_cfg(), "b": pipeline_cfg(window=5)}, dev_cfg, [dev])
 
     assert len(seen) == 2 and np.array_equal(seen[0], seen[1], equal_nan=True)
+
+
+def test_configs_that_differ_only_in_possession_share_the_earlier_stages(idsse, tmp_path,
+                                                                         monkeypatch):
+    dev = devset.load_idsse("J03WTEST", root=tmp_path)
+    calls = []
+    real = devset.prepare_stages
+    monkeypatch.setattr(devset, "prepare_stages",
+                        lambda match, cfg: calls.append(1) or real(match, cfg))
+    dev_cfg = {"seed": 0, "matches": ["J03WTEST"], "degrade": SHORT_GAPS}
+    configs = {
+        "a": pipeline_cfg(),
+        "b": pipeline_cfg(window=5),                                     # possession only
+        "c": pipeline_cfg({"method": "interpolate", "max_gap": 0.5}),    # a different ball
+    }
+
+    devset.run_devset(configs, dev_cfg, [dev])
+
+    assert len(calls) == 2                       # a and b share; c needs its own cleaning
+
+
+def _same(a, b):
+    """Equal arrays (NaN = NaN), or equal plain values."""
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        a, b = np.asarray(a), np.asarray(b)
+        return np.array_equal(a, b, equal_nan=a.dtype.kind == "f")
+    return a == b
+
+
+def test_ball_and_dead_ball_do_not_depend_on_the_possession_settings(idsse, tmp_path):
+    """run_devset reuses the cleaned ball and dead score between configs that differ only in
+    possession: (_stage_key). That is only right while those stages never read cfg["possession"].
+    If one starts to, this test fails instead of the dev set quietly reusing the wrong stages."""
+    dev = devset.load_idsse("J03WTEST", root=tmp_path)
+    cut, _ = devset.degrade_ball(dev.match, SHORT_GAPS, seed=0)
+    ball = {"method": "interpolate", "max_gap": 0.5}
+    a = pipeline_cfg(ball)
+    b = pipeline_cfg(ball, window=50)
+    b["possession"]["dead_threshold"] = 0.9
+    assert devset._stage_key(a) == devset._stage_key(b)
+
+    cleaned_a, track_a, dead_a = devset.prepare_stages(cut, a)
+    cleaned_b, track_b, dead_b = devset.prepare_stages(cut, b)
+
+    assert np.array_equal(cleaned_a.ball_xy, cleaned_b.ball_xy, equal_nan=True)
+    assert np.array_equal(cleaned_a.ball_speed, cleaned_b.ball_speed, equal_nan=True)
+    assert np.array_equal(dead_a, dead_b, equal_nan=True)
+    assert vars(track_a).keys() == vars(track_b).keys()
+    assert all(_same(vars(track_a)[key], vars(track_b)[key]) for key in vars(track_a))
 
 
 def test_the_same_run_gives_the_same_numbers(idsse, tmp_path):
@@ -634,16 +699,27 @@ def two_config_result(tmp_path):
     return devset.run_devset(configs, dev_cfg, [dev])
 
 
-def test_report_has_totals_per_match_and_the_paired_difference(tmp_path):
+def fake_score(spell):
+    """A complete score for one match, with spellF1 set to `spell`."""
+    score = devset.score_labels(np.array(list("HHHHDDAAAA")), np.array(list("HHHHDDAAAA")))
+    return {**score, "spellF1": spell}
+
+
+def test_report_has_the_mean_every_match_and_the_paired_difference(tmp_path):
     text = devset.format_report(two_config_result(tmp_path))
 
     assert text.startswith("Dev set (IDSSE), 1 matches, aggregates only")
     assert "ball: degraded to look like ours" in text
     assert "J03WTEST: ball missing" in text and "gaps" in text
     assert "config baseline" in text and "config interpolate" in text
-    assert "mean: spellF1" in text and "possessions truth" in text
+    for part in ("spellF1", "possessions: truth", "precision", "recall", "alive/dead F1",
+                 "team acc", "switches: F1", "latency"):
+        assert part in text
+    assert "mean: spellF1" in text and "possessions: truth" in text
+    assert text.index("mean: spellF1") < text.index("  J03WTEST\n")   # mean first, then matches
     assert "paired spellF1 difference against baseline" in text
     assert "better on 1 of 1 matches (better)" in text      # interpolation wins on this match
+    assert "    J03WTEST: spellF1 +" in text                 # and the same per match
 
 
 def test_report_says_when_the_ball_was_not_degraded(tmp_path):
@@ -653,14 +729,45 @@ def test_report_says_when_the_ball_was_not_degraded(tmp_path):
 
 
 def test_a_difference_under_the_noise_band_is_called_noise():
-    scores = {"a": {"m": {"spellF1": 0.50, "macroF1": 0.6, "truth_possessions": 9,
-                          "our_possessions": 9}},
-              "b": {"m": {"spellF1": 0.52, "macroF1": 0.6, "truth_possessions": 9,
-                          "our_possessions": 9}}}
+    scores = {"a": {"m": fake_score(0.50)}, "b": {"m": fake_score(0.52)}}
     result = {"matches": {"m": {"missing_share": 0.4}}, "scores": scores}
 
-    assert "(noise)" in devset.format_report(result)
+    text = devset.format_report(result)
+
+    assert "b: +0.020, better on 1 of 1 matches (noise)" in text   # overall
+    assert "m: spellF1 +0.020 (noise)" in text                      # per match
     assert devset.paired_difference(scores["b"], scores["a"]) == (pytest.approx(0.02), 1, 1)
+
+
+def test_the_mean_is_over_matches_and_skips_missing_values():
+    one, two = fake_score(0.4), fake_score(0.6)
+    two["latency_mean"] = None                     # no matched switch in that match
+
+    total = devset.summarise({"m1": one, "m2": two})
+
+    assert total["spellF1"] == pytest.approx(0.5)
+    assert total["spellF1_min"] == pytest.approx(0.4) and total["spellF1_max"] == pytest.approx(0.6)
+    assert total["latency_mean"] == pytest.approx(one["latency_mean"])   # only the one that exists
+
+
+def test_the_overall_line_shows_the_mean_change_of_the_breakdown():
+    base = {"m1": fake_score(0.4), "m2": fake_score(0.4)}
+    better = {"m1": {**fake_score(0.5), "spell_precision": base["m1"]["spell_precision"] + 0.1},
+              "m2": {**fake_score(0.5), "spell_precision": base["m2"]["spell_precision"] + 0.3}}
+    result = {"matches": {"m1": {"missing_share": 0.3}, "m2": {"missing_share": 0.3}},
+              "scores": {"base": base, "new": better}}
+
+    text = devset.format_report(result)
+
+    assert "new: +0.100, better on 2 of 2 matches (better); mean spell_precision +0.200" in text
+
+
+def test_a_missing_latency_is_shown_as_dashes():
+    score = {**fake_score(0.5), "latency_mean": None, "latency_median": None,
+             "latency_abs": None}
+    result = {"matches": {"m": {"missing_share": 0.4}}, "scores": {"a": {"m": score}}}
+
+    assert "latency mean -- / median -- frames (mean |latency| --)" in devset.format_report(result)
 
 
 def test_report_is_short_and_shows_no_positions_or_frame_numbers(tmp_path):
@@ -718,7 +825,24 @@ def test_main_prints_the_report_for_two_configs(cli_setup, capsys):
     out = capsys.readouterr().out
     assert out.startswith("Dev set (IDSSE), 1 matches, aggregates only")
     assert "config baseline" in out and "config ball-interpolate" in out
+    assert "mean: spellF1" in out
     assert "paired spellF1 difference against baseline" in out
+
+
+def test_main_bootstrap_adds_the_interval(cli_setup, capsys):
+    base = vendor.REPO_ROOT / "configs" / "baseline.yaml"
+
+    assert cli.main(["--devset", str(cli_setup), "--bootstrap", "20",
+                     "--config", str(base)]) == 0
+
+    assert "spellF1 bootstrap 5-95%" in capsys.readouterr().out
+
+
+def test_main_refuses_a_negative_bootstrap(cli_setup):
+    base = vendor.REPO_ROOT / "configs" / "baseline.yaml"
+
+    with pytest.raises(SystemExit):
+        cli.main(["--devset", str(cli_setup), "--bootstrap", "-5", "--config", str(base)])
 
 
 def test_main_clean_ball_and_match_filter(cli_setup, capsys):

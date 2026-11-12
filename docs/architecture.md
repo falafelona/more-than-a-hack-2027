@@ -42,7 +42,7 @@ clean(match, cfg) -> BallTrack:
 detect(match, ball, cfg) -> dead_score: float[n]     # 0..1
 
 # possession.py
-predict(match, ball, dead_score, cfg) -> labels: str[n] in {H, A, D}
+predict(match, dead_score, cfg) -> labels: str[n] in {H, A, D}
 
 # pipeline.py
 run(cfg) -> writes outputs/Falafelona.csv, returns {sha256, counts}

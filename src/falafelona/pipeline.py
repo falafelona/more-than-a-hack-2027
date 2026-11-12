@@ -55,7 +55,7 @@ def run(cfg, out, n_frames=None):
     cleaned = cleaner.return_cleaned_data()
 
     dead_score = deadball.detect(cleaned, cleaner.track, cfg)
-    labels = possession.predict(cleaned, cleaner.track, dead_score, cfg)
+    labels = possession.predict(cleaned, dead_score, cfg)
     labels = apply_x_policy(labels, cleaned, cfg)
 
     expected = N_ROWS if n_frames is None else n_frames

@@ -1,0 +1,28 @@
+# Experiment: 3-state H / A / D HMM decoded with Viterbi (Dudu, D13). Copy of final.yaml, only
+# `possession:` changed. Team evidence: how much closer one team is to the ball, fading to none
+# when nobody is within near_distance (a loose ball or a ball in the air).
+# The costs are PLACEHOLDERS. Choose them on other matches (D15), never on this one.
+seed: 0
+
+ball:
+  method: interpolate     # dev set: same score as none (+0.000), kept as the simplest gap filler (RESULTS.md)
+  max_gap: 0.5            # s: fill gaps up to this long with a straight line; longer gaps stay missing
+  max_speed: 40.0         # m/s: do not fill a gap if the ball could not have crossed it this fast
+  speed_slack: 1.0        # m: tracking noise allowed on top of max_speed * time
+
+deadball:
+  method: ball_missing    # score 1 wherever the ball is not observed, else 0
+
+possession:
+  method: hmm
+  team_evidence: margin   # distance margin between the nearest home and away players
+  team_cost: 0.5          # weight of the margin evidence
+  margin_scale: 1.0       # m: a 3 m margin is about 95% sure
+  near_distance: 5.0      # m: nearest player this far away = no evidence
+  dead_weight: 2.0        # how strongly the dead score pulls towards D (and away from H / A)
+  switch_cost: 10.0       # cost of a change between H and A
+  to_dead_cost: 6.0       # cost of going from H or A into D
+  from_dead_cost: 6.0     # cost of leaving D for H or A
+
+output:
+  x_policy: none          # D14 still proposed: no X written yet
