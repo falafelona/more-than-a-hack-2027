@@ -2,9 +2,10 @@
 #
 # WHAT: loads the IDSSE matches listed in configs/devset.yaml, degrades their ball track to look
 #   like ours (gap lengths from the EDA of our match, fixed seed), runs the pipeline stages with
-#   each --config and prints spellF1 / macroF1 per match and on average. With several configs
-#   it also prints the paired difference against the first one. The dev set is what we compare on
-#   (D15); the public 5 minutes never chooses between versions (D9).
+#   each --config and prints spellF1 / macroF1 per match and on average, plus the breakdown that
+#   explains them (possession precision/recall, alive/dead F1, team accuracy, switch timing).
+#   With several configs it also prints the paired difference against the first one. The dev set
+#   is what we compare on (D15); the public 5 minutes never chooses between versions (D9).
 # HOW: humans only on real files, in your own terminal with NO AI tool open (CLAUDE.md):
 #   export IDSSE_DATA_DIR=~/idsse-data          # outside the repo
 #   .venv/bin/python scripts/devset_eval.py --config configs/baseline.yaml \
@@ -12,6 +13,8 @@
 # Other options:
 #   --clean-ball   do not degrade the ball (an upper bound: what the gaps cost us)
 #   --matches J03WPY J03WMX   only these matches (a quick run)
+#   --bootstrap N  a 5-95% interval for spellF1 only, computed per match with N draws (0 = off).
+#                  Slow: matches x configs x N draws. Use it for the final choice between configs.
 #   --summary      only shapes and label counts per match (checks that the files load)
 #   --inspect FILE print the element and attribute NAMES of one IDSSE XML file (no values)
 # Prints aggregates only: no frame numbers, no positions, and it writes no files except the
@@ -46,7 +49,16 @@ def main(argv=None):
     parser.add_argument("--clean-ball", action="store_true", help="do not degrade the ball")
     parser.add_argument("--summary", action="store_true", help="only shapes and counts")
     parser.add_argument("--inspect", default=None, help="print the XML structure of one file")
+    parser.add_argument(
+        "--bootstrap",
+        type=int,
+        default=0,
+        help="draws for a 5-95%% spellF1 interval, per match (0 = off; slow: matches x configs x "
+        "draws, so use e.g. 1000 only for the final choice between configs)",
+    )
     args = parser.parse_args(argv)
+    if args.bootstrap < 0:
+        parser.error("--bootstrap must be 0 or more")
 
     if args.inspect:
         print(devset.inspect_structure(args.inspect))
@@ -67,8 +79,11 @@ def main(argv=None):
     configs = {Path(path).stem: load_config(path) for path in args.config}
     if len(configs) != len(args.config):
         parser.error("two configs have the same file name")
-    result = devset.run_devset(configs, dev_cfg, matches, degrade=not args.clean_ball)
-    print(devset.format_report(result, degrade=not args.clean_ball))
+    degrade = not args.clean_ball
+    result = devset.run_devset(
+        configs, dev_cfg, matches, degrade=degrade, bootstrap_n=args.bootstrap
+    )
+    print(devset.format_report(result, degrade=degrade))
     return 0
 
 
