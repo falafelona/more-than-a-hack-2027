@@ -6,31 +6,43 @@
 # official issue #16 (D15). Files live OUTSIDE the repo, in the folder IDSSE_DATA_DIR points at.
 seed: 0
 
-matches:                  # the seven full matches of the open IDSSE release
+matches:                  # the seven full matches of the open IDSSE release (ids as in the file names)
   - J03WPY
   - J03WMX
   - J03WN1
   - J03WOH
   - J03WOY
-  - J03WPF
-  - J03WQF
+  - J03WQQ
+  - J03WR9
 
 # The ball of IDSSE is almost complete, ours is not. These numbers make the dev ball look like
-# ours. They come from the ball EDA of OUR match (scripts/ball_eda.py, issue #13): copy them from
-# the pasted block. They describe our match only; they are not tuned on it (D9, D15).
+# ours. They come from the ball EDA of OUR match (scripts/ball_eda.py, issue #13, run 2026-11-12).
+# They describe our match only; they are not tuned on it (D9, D15).
 #
-# PLACEHOLDERS until the EDA numbers are filled in. Only the shape is known so far: the ball is
-# missing on about 41% of the graded frames, mostly in long gaps, with few short ones.
+# What the EDA showed: the ball is missing on 40.7% of the graded frames, and 99% of the missing
+# frames are in 131 gaps longer than 5 s (median gap 10.7 s, longest 221 s). Only 16 gaps are
+# shorter than 1 s and together they hold about 0.1% of the missing frames. So methods that fill
+# short gaps (interpolate, kalman) can touch very little of our ball.
 degrade:
-  missing_share: 0.41     # EDA line "ball missing on N (xx.x%)": share of graded frames
-  gaps:                   # EDA gap bins: each bin's share of the MISSING frames (adds up to 1)
-    - {min_s: 0.0, max_s: 0.2,  share: 0.01}   # up to 0.2 s
-    - {min_s: 0.2, max_s: 0.5,  share: 0.02}   # 0.2-0.5 s
-    - {min_s: 0.5, max_s: 1.0,  share: 0.04}   # 0.5-1 s
-    - {min_s: 1.0, max_s: 2.0,  share: 0.08}   # 1-2 s
-    - {min_s: 2.0, max_s: 5.0,  share: 0.20}   # 2-5 s
-    - {min_s: 5.0, max_s: 60.0, share: 0.65}   # over 5 s (max_s: a little above the longest gap)
+  missing_share: 0.407    # EDA: ball missing on 64,643 of 158,857 graded frames (40.7%)
+  gaps:                   # each bin's share of the MISSING frames (adds up to 1)
+    # Gaps up to 5 s: the EDA bins. The three shortest hold under 0.05% each, so only a rough
+    # size is known (13, 2 and 1 gaps); the shares below are about the right count of frames.
+    - {min_s: 0.0, max_s: 0.2,  share: 0.0006}  # up to 0.2 s  (13 gaps)
+    - {min_s: 0.2, max_s: 0.5,  share: 0.0003}  # 0.2-0.5 s    (2 gaps)
+    - {min_s: 0.5, max_s: 1.0,  share: 0.0003}  # 0.5-1 s      (1 gap)
+    - {min_s: 1.0, max_s: 2.0,  share: 0.0}     # 1-2 s        (0 gaps)
+    - {min_s: 2.0, max_s: 5.0,  share: 0.0}     # 2-5 s        (0 gaps)
+    # Gaps over 5 s hold 99.0% of the missing frames, plus the 0.9% in the 3 gaps at a half edge.
+    # The EDA gives only the gap-length quantiles (p25 6.1 s, p50 10.7 s, p75 21.2 s, p95 51.1 s,
+    # p99 138.6 s, max 221.5 s), so this bin is split at those quantiles and the shares are an
+    # estimate of the frames in each piece (about 0.1 uncertainty), not EDA numbers.
+    - {min_s: 5.0,   max_s: 10.72, share: 0.1575}
+    - {min_s: 10.72, max_s: 21.16, share: 0.2069}
+    - {min_s: 21.16, max_s: 51.12, share: 0.3759}
+    - {min_s: 51.12, max_s: 221.5, share: 0.2585}
   false_detections:       # wrong ball positions for the `reject` method; 0 = none
-    share: 0.0            # EDA "jump share" and "outside the pitch" show how many there are
+    share: 0.0            # 0 for now: the EDA's jump share (0.46% of moves above 30 m/s) and 4.19% of seen positions
+                          # outside the pitch (many are real: the ball out of play) do not say how many are wrong
     min_s: 0.04           # shortest wrong stretch (s)
     max_s: 0.2            # longest wrong stretch (s)

@@ -459,10 +459,12 @@ def test_the_experiment_config_loads_and_runs(bundle):
     assert config["ball"]["max_gap"] * match.fps < gap_stop - gap_start
 
 
-def test_baseline_and_final_configs_still_use_the_untouched_ball():
-    """This task must not change the baseline: both shipped configs keep `ball: method: none`."""
-    for name in ("baseline.yaml", "final.yaml"):
-        assert load_config(CONFIGS / name)["ball"]["method"] == "none"
+def test_baseline_keeps_the_untouched_ball_and_final_uses_interpolate():
+    """baseline.yaml keeps `ball: method: none`. final.yaml uses interpolate with the same settings
+    as configs/exp/ball-interpolate.yaml (dev-set decision, experiments/RESULTS.md)."""
+    assert load_config(CONFIGS / "baseline.yaml")["ball"]["method"] == "none"
+    final = load_config(CONFIGS / "final.yaml")["ball"]
+    assert final == load_config(CONFIGS / "exp" / "ball-interpolate.yaml")["ball"]
 
 
 # ---------------------------------------------------------------------------------------------

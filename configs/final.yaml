@@ -3,7 +3,10 @@
 seed: 0
 
 ball:
-  method: none            # no gap filling, no rejection
+  method: interpolate     # dev set: same score as none (+0.000), kept as the simplest gap filler (RESULTS.md)
+  max_gap: 0.5            # s: fill gaps up to this long with a straight line; longer gaps stay missing
+  max_speed: 40.0         # m/s: do not fill a gap if the ball could not have crossed it this fast
+  speed_slack: 1.0        # m: tracking noise allowed on top of max_speed * time
 
 deadball:
   method: ball_missing    # score 1 wherever the ball is not observed, else 0
