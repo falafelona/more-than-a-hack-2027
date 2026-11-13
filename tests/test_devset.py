@@ -309,6 +309,19 @@ def test_cache_gives_the_same_match_without_parsing_again(idsse, tmp_path, monke
     assert second.match.pitch == first.match.pitch and second.match.n_frames == first.match.n_frames
 
 
+def test_a_corrupt_dev_cache_is_parsed_again(idsse, tmp_path):
+    first = devset.load_idsse("J03WTEST", root=tmp_path)
+    (cache,) = (tmp_path / "cache").iterdir()
+    cache.write_bytes(b"not a zip file")
+
+    with pytest.warns(RuntimeWarning, match="could not be read"):
+        second = devset.load_idsse("J03WTEST", root=tmp_path)
+
+    assert np.array_equal(first.match.ball_xy, second.match.ball_xy, equal_nan=True)
+    assert np.array_equal(first.truth, second.truth)
+    assert len(list((tmp_path / "cache").iterdir())) == 1
+
+
 def test_a_changed_file_is_parsed_again(idsse, tmp_path):
     devset.load_idsse("J03WTEST", root=tmp_path)
     path = idsse["positions_path"]
