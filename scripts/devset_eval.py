@@ -12,6 +12,8 @@
 #       configs/exp/ball-interpolate.yaml
 # Other options:
 #   --clean-ball   do not degrade the ball (an upper bound: what the gaps cost us)
+#   --gaps stoppage  put each gap over a dead-ball spell instead of at random (the default comes
+#                  from configs/devset.yaml). Run both: a change we keep must win under both.
 #   --matches J03WPY J03WMX   only these matches (a quick run)
 #   --bootstrap N  a 5-95% interval for spellF1 only, computed per match with N draws (0 = off).
 #                  Slow: matches x configs x N draws. Use it for the final choice between configs.
@@ -47,6 +49,8 @@ def main(argv=None):
     parser.add_argument("--devset", default=str(REPO_ROOT / "configs" / "devset.yaml"))
     parser.add_argument("--matches", nargs="+", default=None, help="only these IDSSE match ids")
     parser.add_argument("--clean-ball", action="store_true", help="do not degrade the ball")
+    parser.add_argument("--gaps", choices=devset.PLACEMENTS, default=None,
+                        help="where the gaps go (default: degrade.placement in the devset config)")
     parser.add_argument("--summary", action="store_true", help="only shapes and counts")
     parser.add_argument("--inspect", default=None, help="print the XML structure of one file")
     parser.add_argument(
@@ -65,6 +69,8 @@ def main(argv=None):
         return 0
 
     dev_cfg = load_dev_config(args.devset)
+    if args.gaps:
+        dev_cfg["degrade"] = {**dev_cfg["degrade"], "placement": args.gaps}
     ids = args.matches or dev_cfg["matches"]
     root = devset.idsse_dir()
     matches = [devset.load_idsse(match_id, root=root) for match_id in ids]

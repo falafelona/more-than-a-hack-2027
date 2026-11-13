@@ -75,6 +75,12 @@ POSSESSION_HOME, POSSESSION_AWAY = 1, 2
 
 TIGHT_TAU, LOOSE_TAU = min(pm.TAUS), max(pm.TAUS)   # transition tolerances: 12 and 25 frames
 HEADLINE_IOU = pm.SPELL_IOU_HEADLINE                # possession precision/recall at IoU 0.5
+# Where the cut gaps go (configs/devset.yaml degrade.placement, or --gaps):
+#   random:   anywhere in a half, so mostly over live play (an occlusion in open play)
+#   stoppage: each gap hides one dead-ball spell of the truth (the ball lost while it is out)
+# Our real gaps are a mix of both, so the two bracket the truth: a method that only wins under
+# one of them is betting on how our gaps are made.
+PLACEMENTS = ("random", "stoppage")
 # Besides spellF1, these get a paired difference in the report: they say WHY spellF1 moved.
 PAIRED_EXTRA = ("spell_precision", "spell_recall", "alive_dead_f1", "team_acc", "trans_f1_tight")
 
@@ -426,6 +432,10 @@ def _degrade_settings(section, fps):
     total = sum(b[2] for b in bins)
     if not bins or abs(total - 1.0) > 1e-6:
         raise ValueError(f"devset config: gap bin shares must add up to 1, they add up to {total}")
+    placement = section.get("placement", "random")
+    if placement not in PLACEMENTS:
+        raise ValueError(f"devset config: degrade.placement must be one of {PLACEMENTS}, "
+                         f"got {placement!r}")
     faults = section.get("false_detections") or {}
     fault_share = faults.get("share", 0.0)
     if not 0 <= fault_share < 1:
@@ -436,6 +446,7 @@ def _degrade_settings(section, fps):
         raise ValueError("devset config: false_detections holds no whole frame")
     return {
         "missing_share": float(share),
+        "placement": placement,
         "bins": bins,
         "fault_share": float(fault_share),
         "fault_low": fault_low,
@@ -473,7 +484,43 @@ def _place(rng, ranges, blocked, length, tries=200):
     return None
 
 
-def degrade_ball(match, section, seed):
+def _stoppages(truth, ranges):
+    """[(start, stop, half_start, half_stop)] of every dead-ball spell (truth D) inside a half."""
+    spells = []
+    for low, high in ranges:
+        dead = np.concatenate(([False], truth[low:high] == "D", [False]))
+        edges = np.flatnonzero(dead[1:] != dead[:-1])
+        spells.extend((low + int(s), low + int(e), low, high) for s, e in zip(edges[0::2],
+                                                                               edges[1::2]))
+    return spells
+
+
+def _place_on_stoppage(rng, stoppages, blocked, length, tries=200):
+    """Start of a gap of `length` frames that hides one untouched stoppage, or None.
+
+    The stoppage is drawn uniformly from those no gap has touched yet. A gap at least as long as
+    the stoppage covers all of it (the extra frames fall before and after, at random); a shorter
+    gap lies inside it. Same margins as _place: one free frame on each side, and one seen frame
+    at each half edge. Marks the gap blocked.
+    """
+    free = [spell for spell in stoppages if not blocked[spell[0]:spell[1]].any()]
+    for _ in range(min(tries, 4 * len(free))):
+        start_d, stop_d, low, high = free[int(rng.integers(0, len(free)))]
+        if length >= stop_d - start_d:
+            first, last = stop_d - length, start_d
+        else:
+            first, last = start_d, stop_d - length
+        first, last = max(first, low + 1), min(last, high - 1 - length)
+        if last < first:
+            continue
+        start = int(rng.integers(first, last + 1))
+        if not blocked[start - 1:start + length + 1].any():
+            blocked[start - 1:start + length + 1] = True
+            return start
+    return None
+
+
+def degrade_ball(match, section, seed, truth=None):
     """A copy of `match` whose ball track looks like ours. Returns (new_match, report).
 
     Step 1 (only if false_detections.share > 0): short stretches of seen frames get a wrong
@@ -483,16 +530,26 @@ def degrade_ball(match, section, seed):
     follow the bins of `section["gaps"]` (each bin's share of the MISSING frames, like the EDA
     report), the length inside a bin is uniform, and the longest bin is placed first. Each bin
     may overshoot its target by at most one gap. Gaps stay inside one half.
+    Where a gap goes is `section["placement"]` (PLACEMENTS): "random" (the default) anywhere,
+    "stoppage" over one dead-ball spell of `truth` each. When every stoppage is taken, the rest
+    of the gaps go anywhere, and the report counts them (gaps_off_stoppage).
     The truth and the players are untouched. Same seed, same result.
-    The report holds counts only: wanted, placed and unplaced gaps, and the missing share reached.
+    truth: str[n] H/A/D/X. Needed for "stoppage"; with it, the report also gives the share of
+    the cut frames that are dead ball in the truth (cut_on_dead), against the dead share of
+    all graded frames (truth_dead), so the two placements can be told apart in numbers.
+    The report holds counts and shares only.
     """
     settings = _degrade_settings(section, match.fps)
+    on_stoppages = settings["placement"] == "stoppage"
+    if on_stoppages and truth is None:
+        raise ValueError("degrade.placement 'stoppage' needs the truth")
     rng = np.random.default_rng(seed)
     ranges = _half_ranges(match.period)
     graded = int(sum(stop - start for start, stop in ranges))
     ball_xy = match.ball_xy.copy()
     ball_speed = match.ball_speed.copy()
-    report = {"false_stretches": 0, "gaps_placed": 0, "gaps_unplaced": 0}
+    report = {"placement": settings["placement"], "false_stretches": 0, "gaps_placed": 0,
+              "gaps_unplaced": 0, "gaps_off_stoppage": 0}
     if not graded:
         return match, {**report, "missing_share": None}
 
@@ -500,24 +557,35 @@ def degrade_ball(match, section, seed):
         report["false_stretches"] = _inject_false(rng, ball_xy, ranges, graded, match.pitch,
                                                    settings)
 
+    stoppages = _stoppages(truth, ranges) if on_stoppages else []
     blocked = np.zeros(match.n_frames, dtype=bool)
+    cut = np.zeros(match.n_frames, dtype=bool)
     wanted_frames = settings["missing_share"] * graded
     for low, high, share in sorted(settings["bins"], reverse=True):
         target, done = round(wanted_frames * share), 0
         while done < target:
             length = int(rng.integers(low, high + 1))
-            start = _place(rng, ranges, blocked, length)
+            start = _place_on_stoppage(rng, stoppages, blocked, length) if on_stoppages else None
+            off_stoppage = on_stoppages and start is None
+            if start is None:
+                start = _place(rng, ranges, blocked, length)
             if start is None:
                 report["gaps_unplaced"] += 1
                 break                              # this bin has no room left
+            report["gaps_off_stoppage"] += off_stoppage
             ball_xy[start:start + length] = np.nan
             ball_speed[start:start + length] = np.nan
+            cut[start:start + length] = True
             done += length
             report["gaps_placed"] += 1
 
     ball_speed[np.isnan(ball_xy[:, 0])] = np.nan
     graded_mask = match.period > 0
     report["missing_share"] = float(np.isnan(ball_xy[graded_mask, 0]).mean())
+    if truth is not None:
+        dead = truth == "D"
+        report["cut_on_dead"] = float(dead[cut].mean()) if cut.any() else None
+        report["truth_dead"] = float(dead[graded_mask].mean())
     return replace(match, ball_xy=ball_xy, ball_speed=ball_speed), report
 
 
@@ -647,7 +715,7 @@ def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0):
         match = dev.match
         if degrade:
             match, report = degrade_ball(
-                match, dev_cfg["degrade"], match_seed(dev_cfg["seed"], dev.match_id)
+                match, dev_cfg["degrade"], match_seed(dev_cfg["seed"], dev.match_id), dev.truth
             )
         else:
             graded = match.period > 0
@@ -763,14 +831,23 @@ def format_report(result, degrade=True):
     """
     names = list(result["scores"])
     lines = [f"Dev set (IDSSE), {len(result['matches'])} matches, aggregates only"]
+    placements = {r.get("placement", "random") for r in result["matches"].values()}
+    where = {"random": "gaps at random (mostly live play)",
+             "stoppage": "gaps over stoppages (dead-ball spells)"}
     lines.append(
-        "ball: degraded to look like ours (fixed seed)" if degrade
+        f"ball: degraded to look like ours (fixed seed), "
+        f"{', '.join(where[p] for p in sorted(placements))}" if degrade
         else "ball: as tracked, NOT degraded (an upper bound)"
     )
     for match_id, report in result["matches"].items():
         extra = ""
         if "gaps_placed" in report:
             extra = f", {report['gaps_placed']} gaps"
+            if report.get("cut_on_dead") is not None:
+                extra += (f", {100 * report['cut_on_dead']:.0f}% of cut frames are dead ball "
+                          f"(truth: {100 * report['truth_dead']:.0f}% of all)")
+            if report.get("gaps_off_stoppage"):
+                extra += f", {report['gaps_off_stoppage']} gaps found no free stoppage"
             if report["false_stretches"]:
                 extra += f", {report['false_stretches']} false stretches"
             if report["gaps_unplaced"]:
