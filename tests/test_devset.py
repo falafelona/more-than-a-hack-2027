@@ -440,6 +440,89 @@ def test_speed_is_dropped_wherever_the_position_is_missing():
     assert np.array_equal(np.isnan(new.ball_speed), np.isnan(new.ball_xy[:, 0]))
 
 
+def scripted_truth(match, play_s=30, dead_s=8):
+    """H/A/D truth for long_match: play and dead-ball spells in turn, X outside the halves."""
+    play, dead = int(play_s * match.fps), int(dead_s * match.fps)
+    cycle = np.array(["H"] * play + ["D"] * dead)
+    truth = np.resize(cycle, match.n_frames).astype("<U1")
+    truth[match.period == 0] = "X"
+    return truth
+
+
+STOPPAGE_GAPS = {   # 2-12 s gaps: shorter and longer than the 8 s stoppages
+    "missing_share": 0.15,
+    "gaps": [{"min_s": 2.0, "max_s": 12.0, "share": 1.0}],
+}
+
+
+def test_stoppage_gaps_hide_dead_ball_and_random_gaps_mostly_live_play():
+    match = long_match()
+    truth = scripted_truth(match)
+    on_dead, report = devset.degrade_ball(match, {**STOPPAGE_GAPS, "placement": "stoppage"},
+                                          seed=1, truth=truth)
+    at_random, random_report = devset.degrade_ball(match, STOPPAGE_GAPS, seed=1, truth=truth)
+
+    assert report["placement"] == "stoppage" and random_report["placement"] == "random"
+    assert report["truth_dead"] == pytest.approx(8 / 38, abs=0.01)
+    assert random_report["cut_on_dead"] == pytest.approx(report["truth_dead"], abs=0.08)
+    assert report["cut_on_dead"] > 0.6                       # most cut frames are dead ball
+    assert report["gaps_off_stoppage"] == 0
+    for new, rep in ((on_dead, report), (at_random, random_report)):   # same lengths, same share
+        assert rep["missing_share"] == pytest.approx(0.15, abs=0.01)
+        assert len(gap_lengths(new.ball_xy, new.period)) == rep["gaps_placed"]
+
+
+def test_a_stoppage_gap_covers_the_whole_spell_or_lies_inside_it():
+    match = long_match()
+    truth = scripted_truth(match)
+    new, _ = devset.degrade_ball(match, {**STOPPAGE_GAPS, "placement": "stoppage"}, seed=4,
+                                 truth=truth)
+    spells = [(s, e) for s, e, _, _ in devset._stoppages(truth, devset._half_ranges(match.period))]
+    missing = np.isnan(new.ball_xy[:, 0]) & (match.period > 0)
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], missing.astype(int), [0]))))
+
+    for start, stop in zip(edges[0::2], edges[1::2]):
+        touched = [(s, e) for s, e in spells if s < stop and e > start]
+        assert len(touched) == 1                             # one stoppage per gap
+        s, e = touched[0]
+        assert (start <= s and stop >= e) or (s <= start and stop <= e)
+
+
+def test_stoppage_gaps_go_anywhere_once_every_stoppage_is_taken():
+    match = long_match()
+    truth = scripted_truth(match, play_s=150, dead_s=3)     # few, short stoppages
+    section = {**STOPPAGE_GAPS, "missing_share": 0.3, "placement": "stoppage"}
+    new, report = devset.degrade_ball(match, section, seed=0, truth=truth)
+
+    assert report["gaps_off_stoppage"] > 0
+    assert report["missing_share"] >= 0.29                   # the share is still reached
+    assert report["gaps_placed"] == len(gap_lengths(new.ball_xy, new.period))
+
+
+def test_random_placement_ignores_the_truth_so_earlier_results_reproduce():
+    match = long_match()
+    with_truth, _ = devset.degrade_ball(match, DEGRADE, seed=5, truth=scripted_truth(match))
+    without, report = devset.degrade_ball(match, DEGRADE, seed=5)
+
+    assert np.array_equal(with_truth.ball_xy, without.ball_xy, equal_nan=True)
+    assert "cut_on_dead" not in report
+
+
+def test_stoppage_placement_needs_the_truth():
+    with pytest.raises(ValueError, match="needs the truth"):
+        devset.degrade_ball(long_match(), {**DEGRADE, "placement": "stoppage"}, seed=0)
+
+
+def test_stoppage_placement_is_repeatable():
+    match = long_match()
+    truth = scripted_truth(match)
+    section = {**STOPPAGE_GAPS, "placement": "stoppage"}
+    a, _ = devset.degrade_ball(match, section, seed=2, truth=truth)
+    b, _ = devset.degrade_ball(match, section, seed=2, truth=truth)
+
+    assert np.array_equal(a.ball_xy, b.ball_xy, equal_nan=True)
+
+
 class Scripted:
     """Stands in for the random generator and hands out the numbers a test picked."""
 
@@ -529,6 +612,7 @@ def test_false_detections_replace_seen_positions_with_points_on_the_pitch():
         ({"missing_share": 0.3, "gaps": [{"min_s": 0, "max_s": 1, "share": 1.5},
                                          {"min_s": 1, "max_s": 2, "share": -0.5}]}, "negative"),
         ({**DEGRADE, "false_detections": {"share": 1.0}}, "false_detections.share"),
+        ({**DEGRADE, "placement": "occlusion"}, "placement must be one of"),
     ],
 )
 def test_bad_degrade_settings_are_refused(section, message):
@@ -867,6 +951,17 @@ def test_main_clean_ball_and_match_filter(cli_setup, capsys):
     assert "NOT degraded" in capsys.readouterr().out
 
 
+def test_main_gaps_flag_puts_the_gaps_over_stoppages(cli_setup, capsys):
+    base = vendor.REPO_ROOT / "configs" / "baseline.yaml"
+
+    assert cli.main(["--devset", str(cli_setup), "--config", str(base)]) == 0
+    assert "gaps at random" in capsys.readouterr().out
+    assert cli.main(["--devset", str(cli_setup), "--gaps", "stoppage",
+                     "--config", str(base)]) == 0
+    out = capsys.readouterr().out
+    assert "gaps over stoppages" in out and "of cut frames are dead ball" in out
+
+
 def test_main_summary_prints_counts_only(cli_setup, capsys):
     assert cli.main(["--devset", str(cli_setup), "--summary"]) == 0
 
@@ -897,3 +992,4 @@ def test_the_shipped_devset_config_is_valid():
     assert len(cfg["matches"]) == 7 and cfg["seed"] == 0
     settings = devset._degrade_settings(cfg["degrade"], 25.0)    # also checks the bins add up
     assert 0 < settings["missing_share"] < 1
+    assert settings["placement"] == "random"     # the default: earlier RESULTS.md rows reproduce

@@ -10,6 +10,7 @@
 #   make devset      compare configs on the IDSSE dev set (experiments/README.md). The first
 #                    config is the reference. Default: baseline vs final. Another pair:
 #                    make devset CONFIGS="configs/final.yaml configs/exp/x.yaml"
+#                    make devset GAPS=stoppage   gaps over dead-ball spells instead of at random
 #
 # `submission`, `validate` and `devset` read real data or real outputs: humans run them, not AI agents.
 
@@ -53,7 +54,7 @@ validate:
 
 devset:
 	@test -n "$$IDSSE_DATA_DIR" || { echo "IDSSE_DATA_DIR is not set (experiments/README.md)"; exit 1; }
-	$(PY) scripts/devset_eval.py --config $(CONFIGS)
+	$(PY) scripts/devset_eval.py --config $(CONFIGS) $(if $(GAPS),--gaps $(GAPS))
 
 clean:
 	rm -rf .pytest_cache .ruff_cache build src/*.egg-info
