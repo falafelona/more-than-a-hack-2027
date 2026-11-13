@@ -1,0 +1,46 @@
+# Experiment: the HMM decoder and the combined dead-ball score, tested as ONE pair (code review
+# 13 Nov, item 1). Copy of poss-hmm-margin.yaml with `deadball:` taken from dead-combined.yaml.
+# With nearest_majority the dead score inside a ball gap changes nothing; with the HMM a frame
+# leans to D when the score is above 0.5, so the score reads as "chance the ball is dead".
+# Run against final.yaml under both gap cuts (random and stoppage) for one Go / No-Go.
+# The dev set has no Smart Tagging: before_kickoff and before_restart give 0 there, so the dev
+# score judges the other three clues. All numbers are PLACEHOLDERS until chosen on other matches (D15).
+seed: 0
+
+ball:
+  method: interpolate     # dev set: same score as none (+0.000), kept as the simplest gap filler (RESULTS.md)
+  max_gap: 0.5            # s: fill gaps up to this long with a straight line; longer gaps stay missing
+  max_speed: 40.0         # m/s: do not fill a gap if the ball could not have crossed it this fast
+  speed_slack: 1.0        # m: tracking noise allowed on top of max_speed * time
+
+deadball:
+  method: combined        # chance the ball is dead: each clue adds its weight where it fires, capped at 1
+  weights:
+    before_kickoff: 1.0   # certain: graded second-half frames before its kickoff are always dead
+    out_of_bounds: 1.0    # strongest clue: enough on its own
+    before_restart: 0.6   # enough on its own: before a tagged restart the ball is dead, even if players move
+    players_still: 0.4    # not enough alone: a visible ball in play means alive. Dead with ball_missing
+    ball_missing: 0.3     # weak: the ball also goes missing in live play. Needs another clue
+  out_margin: 1.0         # metres past the line before we call it out
+  still_speed: 1.0        # m/s, a bit slower than walking pace
+  still_seconds: 3        # how long the players must stay slow
+  restart_seconds:        # seconds of dead ball before each restart tag. Too long reaches into live play
+    throw-in: 8
+    corner kick: 15
+    goal kick: 20
+    free kick: 25
+    kick off (after goal): 45   # includes the celebration
+
+possession:
+  method: hmm
+  team_evidence: margin   # distance margin between the nearest home and away players
+  team_cost: 0.5          # weight of the margin evidence
+  margin_scale: 1.0       # m: a 3 m margin is about 95% sure
+  near_distance: 5.0      # m: nearest player this far away = no evidence
+  dead_weight: 2.0        # how strongly the dead score pulls towards D (and away from H / A)
+  switch_cost: 10.0       # cost of a change between H and A
+  to_dead_cost: 6.0       # cost of going from H or A into D
+  from_dead_cost: 6.0     # cost of leaving D for H or A
+
+output:
+  x_policy: none          # D14 still proposed: no X written yet
