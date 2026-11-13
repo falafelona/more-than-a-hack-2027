@@ -41,6 +41,62 @@ def test_cache_gives_same_arrays(bundle):
     np.testing.assert_array_equal(first.ball_xy, second.ball_xy)
 
 
+def _only_cache(bundle):
+    files = list((bundle["root"] / "cache").iterdir())
+    assert len(files) == 1                       # no temporary file is left behind
+    return files[0]
+
+
+def test_a_corrupt_cache_is_parsed_again_and_replaced(bundle):
+    first = io.load_match(n_frames=bundle["n_frames"])
+    cache = _only_cache(bundle)
+    cache.write_bytes(cache.read_bytes()[:100])  # a run killed while writing it
+
+    with pytest.warns(RuntimeWarning, match="could not be read"):
+        second = io.load_match(n_frames=bundle["n_frames"])
+
+    np.testing.assert_array_equal(first.ball_xy, second.ball_xy)
+    np.testing.assert_array_equal(first.players_speed, second.players_speed)
+    assert io.read_cache(_only_cache(bundle), {"ball_xy": (bundle["n_frames"], 2)}) is not None
+
+
+def test_a_cache_with_the_wrong_shapes_is_not_used(bundle):
+    first = io.load_match(n_frames=bundle["n_frames"])
+    cache = _only_cache(bundle)
+    n = bundle["n_frames"]
+    np.savez(cache.with_suffix(""), ball_xy=np.zeros((n, 3)), players_xy=np.zeros((n, 46, 2)),
+             ball_speed=np.zeros(n), players_speed=np.zeros((n, 46)))
+
+    with pytest.warns(RuntimeWarning, match="unexpected shapes"):
+        second = io.load_match(n_frames=n)
+
+    np.testing.assert_array_equal(first.ball_xy, second.ball_xy)
+
+
+def test_an_unwritable_cache_folder_does_not_stop_the_run(bundle):
+    (bundle["root"] / "cache").write_text("a file where the cache folder should be")
+
+    with pytest.warns(RuntimeWarning, match="could not be written"):
+        match = io.load_match(n_frames=bundle["n_frames"])
+
+    reference = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
+    np.testing.assert_array_equal(match.ball_xy, reference.ball_xy)
+
+
+def test_read_cache_of_a_missing_file_is_quiet(tmp_path, recwarn):
+    assert io.read_cache(tmp_path / "nothing.npz", {"a": (1,)}) is None
+    assert not recwarn.list
+
+
+def test_write_cache_replaces_the_file_in_one_step(tmp_path):
+    path = tmp_path / "cache" / "x.npz"
+    assert io.write_cache(path, a=np.arange(3))
+    assert io.write_cache(path, a=np.arange(4))
+
+    assert [f.name for f in path.parent.iterdir()] == ["x.npz"]
+    assert io.read_cache(path, {"a": (None,)})["a"].size == 4
+
+
 def test_summary_has_no_values(bundle):
     match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
     summary = io.summary(match)

@@ -9,7 +9,10 @@ Rules this module enforces:
 - MTAH_DATA_DIR must resolve to a folder outside this repo.
 - Nothing is loaded at import time. Importing this module reads no data.
 - File paths come from games.require(); no file name is spelled out here.
-- Parsed arrays are cached under $MTAH_DATA_DIR/cache/, never in the repo (D2).
+- Parsed arrays are cached under $MTAH_DATA_DIR/cache/, never in the repo (D2). The cache is
+  only a shortcut: a corrupt or unreadable cache is parsed again, and a folder that cannot be
+  written (read-only disk, D16) means no cache, never a failed run. It never falls back to a
+  folder in the repo.
 - Nothing here prints rows or values. summary() gives shapes and counts only.
 
 The raw ATD is parsed with numpy only, the same way the organisers' starter/baseline.py reads it
@@ -23,9 +26,13 @@ Smart Tagging and the homography are read with the organisers' own starter loade
   divide Match positions (metres) by Match.pitch before projecting.
 """
 
+import contextlib
 import hashlib
 import os
+import pickle
+import warnings
 import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +46,10 @@ games = vendor.games
 # Bump when the parsing changes, so old caches are not reused.
 # 2: ball_speed and players_speed added (PR #9).
 LOADER_VERSION = 2
+
+# What np.load raises on a truncated, corrupt or unreadable file, or one missing an array.
+CACHE_READ_ERRORS = (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile,
+                     pickle.UnpicklingError)
 
 FIELD_SEP = ":"
 GROUP_SEP = ";"
@@ -241,10 +252,67 @@ def _cache_path(root, game, meta_path, raw_path, n_frames):
     return root / "cache" / f"{game}_match_{key.hexdigest()[:16]}.npz"
 
 
+def _shape_fits(actual, expected):
+    """True if `actual` has the shape `expected`, where a None dimension fits any size."""
+    return len(actual) == len(expected) and all(
+        want is None or got == want for got, want in zip(actual, expected)
+    )
+
+
+def read_cache(path, shapes):
+    """The arrays stored in a cache file, or None if it cannot be used. Never raises.
+
+    shapes: {name: expected shape}, None for a dimension of any size. A missing file gives None quietly. A file that is truncated,
+    corrupt, unreadable or holds other names or shapes gives None with a warning, and the caller
+    parses the source files again (the cache is only a shortcut, never the truth).
+    """
+    path = Path(path)
+    if not path.is_file():
+        return None
+    try:
+        with np.load(path) as stored:
+            arrays = {name: stored[name] for name in shapes}
+    except CACHE_READ_ERRORS as error:
+        warnings.warn(f"cache {path.name} could not be read ({type(error).__name__}); "
+                      f"parsing the source files again", RuntimeWarning, stacklevel=2)
+        return None
+    wrong = [name for name, shape in shapes.items() if not _shape_fits(arrays[name].shape, shape)]
+    if wrong:
+        warnings.warn(f"cache {path.name} has unexpected shapes for {wrong}; parsing the source "
+                      f"files again", RuntimeWarning, stacklevel=2)
+        return None
+    return arrays
+
+
+def write_cache(path, **arrays):
+    """Store arrays in a cache file. True if it was written. Never raises.
+
+    Written to a temporary file next to it and renamed into place, so a run killed halfway
+    never leaves a half-written cache behind. If the folder cannot be written (a read-only
+    data disk, a full disk), the run goes on without a cache and says so.
+    """
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(exist_ok=True)
+        with open(tmp, "wb") as handle:
+            np.savez(handle, **arrays)
+        os.replace(tmp, path)
+        return True
+    except OSError as error:
+        with contextlib.suppress(OSError):     # the folder itself may be what is broken
+            tmp.unlink(missing_ok=True)
+        warnings.warn(f"cache {path.name} could not be written ({type(error).__name__}); "
+                      f"going on without it", RuntimeWarning, stacklevel=2)
+        return False
+
+
 def load_match(game=games.GAME, n_frames=None, use_cache=True):
     """Load the tactical ATD of `game` from MTAH_DATA_DIR into a Match.
 
     n_frames defaults to the official submission length (199,319). Tests pass a small number.
+    The parsed arrays are cached under $MTAH_DATA_DIR/cache/. A bad or unwritable cache falls
+    back to parsing (read_cache, write_cache): the result is the same, only slower.
     """
     root = data_dir()
     meta_path, raw_path = games.require(["atd_meta", "atd_raw"], game, str(root))
@@ -252,19 +320,21 @@ def load_match(game=games.GAME, n_frames=None, use_cache=True):
     info = games.GAMES[game]
 
     slot_team = slot_teams(meta_path)
+    n_slots = len(slot_team)
     cache = _cache_path(root, game, meta_path, raw_path, n) if use_cache else None
+    shapes = {"ball_xy": (n, 2), "players_xy": (n, n_slots, 2), "ball_speed": (n,),
+              "players_speed": (n, n_slots)}
 
-    if cache is not None and cache.is_file():
-        with np.load(cache) as stored:
-            ball_xy, players_xy = stored["ball_xy"], stored["players_xy"]
-            ball_speed, players_speed = stored["ball_speed"], stored["players_speed"]
+    stored = read_cache(cache, shapes) if cache is not None else None
+    if stored is not None:
+        ball_xy, players_xy = stored["ball_xy"], stored["players_xy"]
+        ball_speed, players_speed = stored["ball_speed"], stored["players_speed"]
     else:
         ball_xy, players_xy, ball_speed, players_speed = parse_raw(
-            raw_path, n, len(slot_team), info["pitch"]
+            raw_path, n, n_slots, info["pitch"]
         )
         if cache is not None:
-            cache.parent.mkdir(exist_ok=True)
-            np.savez(
+            write_cache(
                 cache,
                 ball_xy=ball_xy,
                 players_xy=players_xy,

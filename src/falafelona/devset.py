@@ -56,7 +56,7 @@ import numpy as np
 
 from falafelona import deadball, possession, vendor
 from falafelona.ball import DataCleaner
-from falafelona.io import Match
+from falafelona.io import Match, read_cache, write_cache
 from falafelona.pipeline import apply_x_policy
 
 pm = vendor.possession_metrics
@@ -341,6 +341,22 @@ def _cache_file(root, match_id, info_path, positions_path, pitch, origin, pad):
     return Path(root) / "cache" / f"{match_id}_{key.hexdigest()[:16]}.npz"
 
 
+def _read_dev_cache(path):
+    """The cached arrays of one match, or None (then it is parsed again; see io.read_cache).
+
+    The frame count is not known before parsing, so it is taken from `period` and every other
+    array must agree with it.
+    """
+    probe = read_cache(path, {"period": (None,)}) if Path(path).is_file() else None
+    if probe is None:
+        return None
+    n = probe["period"].size
+    return read_cache(path, {
+        "period": (n,), "ball_xy": (n, 2), "ball_speed": (n,), "players_xy": (n, N_SLOTS, 2),
+        "players_speed": (n, N_SLOTS), "slot_team": (N_SLOTS,), "truth": (n,),
+    })
+
+
 def load_idsse(match_id, root=None, pitch=None, origin="auto", pad=HALFTIME_PAD, use_cache=True):
     """Load one IDSSE match into a DevMatch.
 
@@ -356,25 +372,24 @@ def load_idsse(match_id, root=None, pitch=None, origin="auto", pad=HALFTIME_PAD,
             f"match {match_id}: no PitchX/PitchY in the match information; pass pitch=(105, 68)"
         )
     cache = _cache_file(root, match_id, info_path, positions_path, size, origin, pad)
-    if use_cache and cache.is_file():
-        with np.load(cache) as stored:
-            match = Match(
-                n_frames=int(stored["period"].size),
-                fps=FPS,
-                period=stored["period"],
-                ball_xy=stored["ball_xy"],
-                ball_speed=stored["ball_speed"],
-                players_xy=stored["players_xy"],
-                players_speed=stored["players_speed"],
-                slot_team=stored["slot_team"],
-                pitch=(float(size[0]), float(size[1])),
-            )
-            return DevMatch(match_id, match, stored["truth"])
+    stored = _read_dev_cache(cache) if use_cache else None
+    if stored is not None:
+        match = Match(
+            n_frames=int(stored["period"].size),
+            fps=FPS,
+            period=stored["period"],
+            ball_xy=stored["ball_xy"],
+            ball_speed=stored["ball_speed"],
+            players_xy=stored["players_xy"],
+            players_speed=stored["players_speed"],
+            slot_team=stored["slot_team"],
+            pitch=(float(size[0]), float(size[1])),
+        )
+        return DevMatch(match_id, match, stored["truth"])
     periods = read_positions(positions_path, info)
     match, truth = build_match(periods, info, size, origin, pad)
     if use_cache:
-        cache.parent.mkdir(exist_ok=True)
-        np.savez(
+        write_cache(
             cache,
             period=match.period,
             ball_xy=match.ball_xy,
