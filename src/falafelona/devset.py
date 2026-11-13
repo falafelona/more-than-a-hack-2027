@@ -76,8 +76,9 @@ POSSESSION_HOME, POSSESSION_AWAY = 1, 2
 TIGHT_TAU, LOOSE_TAU = min(pm.TAUS), max(pm.TAUS)   # transition tolerances: 12 and 25 frames
 HEADLINE_IOU = pm.SPELL_IOU_HEADLINE                # possession precision/recall at IoU 0.5
 # Where the cut gaps go (configs/devset.yaml degrade.placement, or --gaps):
-#   random:   anywhere in a half, so mostly over live play (an occlusion in open play)
-#   stoppage: each gap hides one dead-ball spell of the truth (the ball lost while it is out)
+#   random:   anywhere in a half, so on dead ball only by chance (an occlusion in open play)
+#   stoppage: each gap starts as one dead-ball spell of the truth starts (the ball lost as it
+#             goes out), up to stoppage_lead_s earlier
 # Our real gaps are a mix of both, so the two bracket the truth: a method that only wins under
 # one of them is betting on how our gaps are made.
 PLACEMENTS = ("random", "stoppage")
@@ -436,6 +437,13 @@ def _degrade_settings(section, fps):
     if placement not in PLACEMENTS:
         raise ValueError(f"devset config: degrade.placement must be one of {PLACEMENTS}, "
                          f"got {placement!r}")
+    stoppage_lead = 0
+    if placement == "stoppage":
+        lead_s = section.get("stoppage_lead_s")
+        if isinstance(lead_s, bool) or not isinstance(lead_s, (int, float)) or lead_s < 0:
+            raise ValueError("devset config: placement 'stoppage' needs degrade.stoppage_lead_s, "
+                             f"0 or more seconds, got {lead_s!r}")
+        stoppage_lead = int(np.floor(lead_s * fps + 1e-9))
     faults = section.get("false_detections") or {}
     fault_share = faults.get("share", 0.0)
     if not 0 <= fault_share < 1:
@@ -447,6 +455,7 @@ def _degrade_settings(section, fps):
     return {
         "missing_share": float(share),
         "placement": placement,
+        "stoppage_lead": stoppage_lead,
         "bins": bins,
         "fault_share": float(fault_share),
         "fault_low": fault_low,
@@ -495,25 +504,24 @@ def _stoppages(truth, ranges):
     return spells
 
 
-def _place_on_stoppage(rng, stoppages, blocked, length, tries=200):
-    """Start of a gap of `length` frames that hides one untouched stoppage, or None.
+def _place_on_stoppage(rng, stoppages, blocked, length, lead, tries=200):
+    """Start of a gap of `length` frames that begins as one untouched stoppage begins, or None.
 
-    The stoppage is drawn uniformly from those no gap has touched yet. A gap at least as long as
-    the stoppage covers all of it (the extra frames fall before and after, at random); a shorter
-    gap lies inside it. Same margins as _place: one free frame on each side, and one seen frame
-    at each half edge. Marks the gap blocked.
+    The stoppage is drawn uniformly from those no gap has touched yet. The gap starts 0 to
+    `lead` frames before the ball goes dead (uniform), and runs on from there: a gap longer
+    than the stoppage carries on into the play after it, a shorter one ends inside it. On our
+    match the ball tends to vanish as it reaches a line (dead-ball EDA, #28: 32% of gaps start
+    within 2 m of a line, against 9% of seen frames), so the gap starts with the stoppage, not
+    long before it. Same margins as _place: one free frame on each side, and one seen frame at
+    each half edge; a gap that would cross the half's end is tried on another stoppage.
+    Marks the gap blocked.
     """
     free = [spell for spell in stoppages if not blocked[spell[0]:spell[1]].any()]
     for _ in range(min(tries, 4 * len(free))):
-        start_d, stop_d, low, high = free[int(rng.integers(0, len(free)))]
-        if length >= stop_d - start_d:
-            first, last = stop_d - length, start_d
-        else:
-            first, last = start_d, stop_d - length
-        first, last = max(first, low + 1), min(last, high - 1 - length)
-        if last < first:
+        start_d, _stop_d, low, high = free[int(rng.integers(0, len(free)))]
+        start = max(start_d - int(rng.integers(0, lead + 1)), low + 1)
+        if start + length > high - 1:
             continue
-        start = int(rng.integers(first, last + 1))
         if not blocked[start - 1:start + length + 1].any():
             blocked[start - 1:start + length + 1] = True
             return start
@@ -531,8 +539,9 @@ def degrade_ball(match, section, seed, truth=None):
     report), the length inside a bin is uniform, and the longest bin is placed first. Each bin
     may overshoot its target by at most one gap. Gaps stay inside one half.
     Where a gap goes is `section["placement"]` (PLACEMENTS): "random" (the default) anywhere,
-    "stoppage" over one dead-ball spell of `truth` each. When every stoppage is taken, the rest
-    of the gaps go anywhere, and the report counts them (gaps_off_stoppage).
+    "stoppage" starting 0 to `stoppage_lead_s` seconds before one dead-ball spell of `truth`
+    each (_place_on_stoppage). When every stoppage is taken, the rest of the gaps go anywhere,
+    and the report counts them (gaps_off_stoppage).
     The truth and the players are untouched. Same seed, same result.
     truth: str[n] H/A/D/X. Needed for "stoppage"; with it, the report also gives the share of
     the cut frames that are dead ball in the truth (cut_on_dead), against the dead share of
@@ -565,7 +574,10 @@ def degrade_ball(match, section, seed, truth=None):
         target, done = round(wanted_frames * share), 0
         while done < target:
             length = int(rng.integers(low, high + 1))
-            start = _place_on_stoppage(rng, stoppages, blocked, length) if on_stoppages else None
+            start = None
+            if on_stoppages:
+                start = _place_on_stoppage(rng, stoppages, blocked, length,
+                                           settings["stoppage_lead"])
             off_stoppage = on_stoppages and start is None
             if start is None:
                 start = _place(rng, ranges, blocked, length)
@@ -832,8 +844,8 @@ def format_report(result, degrade=True):
     names = list(result["scores"])
     lines = [f"Dev set (IDSSE), {len(result['matches'])} matches, aggregates only"]
     placements = {r.get("placement", "random") for r in result["matches"].values()}
-    where = {"random": "gaps at random (mostly live play)",
-             "stoppage": "gaps over stoppages (dead-ball spells)"}
+    where = {"random": "gaps at random (on dead ball only by chance)",
+             "stoppage": "gaps starting with stoppages (dead-ball spells)"}
     lines.append(
         f"ball: degraded to look like ours (fixed seed), "
         f"{', '.join(where[p] for p in sorted(placements))}" if degrade

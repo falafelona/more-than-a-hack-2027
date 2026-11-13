@@ -25,12 +25,17 @@ matches:                  # the seven full matches of the open IDSSE release (id
 # short gaps (interpolate, kalman) can touch very little of our ball.
 degrade:
   missing_share: 0.407    # EDA: ball missing on 64,643 of 158,857 graded frames (40.7%)
-  # Where the gaps go. random: anywhere, so mostly over live play (occlusions). stoppage: each gap
-  # hides one dead-ball spell of the IDSSE truth (the ball lost while it is out). Our real gaps
-  # are a mix (dead-ball EDA, #28), so the two bracket the truth. Run both (--gaps stoppage, or
+  # Where the gaps go. random: anywhere, so on dead ball only as often as by chance (about 44%
+  # on IDSSE), like occlusions in open play. stoppage: each gap starts as one dead-ball spell of
+  # the IDSSE truth starts (the ball lost as it goes out). Our real gaps are a mix (dead-ball
+  # EDA, #28), so the two bracket the truth. Run both (--gaps stoppage, or
   # make devset GAPS=stoppage): a change goes into final.yaml only if it wins under both.
   # random stays the default so the earlier RESULTS.md rows reproduce exactly.
   placement: random
+  # With stoppage: a gap starts 0 to this many seconds before the ball goes dead and runs on
+  # from there. Our gaps tend to start as the ball reaches a line (dead-ball EDA #28: 32% of gaps
+  # start within 2 m of a line, against 9% of seen frames), so they start with the stoppage.
+  stoppage_lead_s: 1.0
   gaps:                   # each bin's share of the MISSING frames (adds up to 1)
     # Gaps up to 5 s: the EDA bins. The three shortest hold under 0.05% each, so only a rough
     # size is known (13, 2 and 1 gaps); the shares below are about the right count of frames.

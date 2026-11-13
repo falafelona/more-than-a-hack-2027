@@ -452,6 +452,7 @@ def scripted_truth(match, play_s=30, dead_s=8):
 STOPPAGE_GAPS = {   # 2-12 s gaps: shorter and longer than the 8 s stoppages
     "missing_share": 0.15,
     "gaps": [{"min_s": 2.0, "max_s": 12.0, "share": 1.0}],
+    "stoppage_lead_s": 1.0,
 }
 
 
@@ -472,20 +473,35 @@ def test_stoppage_gaps_hide_dead_ball_and_random_gaps_mostly_live_play():
         assert len(gap_lengths(new.ball_xy, new.period)) == rep["gaps_placed"]
 
 
-def test_a_stoppage_gap_covers_the_whole_spell_or_lies_inside_it():
+def test_every_stoppage_gap_starts_within_the_lead_before_its_stoppage():
+    """Finding 3 of the 13 Nov review: a cut starts as the ball goes dead (0-1 s before), never
+    long before it, and a cut longer than the stoppage runs on into the play after it."""
     match = long_match()
     truth = scripted_truth(match)
-    new, _ = devset.degrade_ball(match, {**STOPPAGE_GAPS, "placement": "stoppage"}, seed=4,
-                                 truth=truth)
-    spells = [(s, e) for s, e, _, _ in devset._stoppages(truth, devset._half_ranges(match.period))]
+    lead = 25                                                # 1 s at 25 fps
+    new, report = devset.degrade_ball(match, {**STOPPAGE_GAPS, "placement": "stoppage"},
+                                      seed=4, truth=truth)
+    spell_starts = np.array([s for s, _, _, _ in devset._stoppages(
+        truth, devset._half_ranges(match.period))])
     missing = np.isnan(new.ball_xy[:, 0]) & (match.period > 0)
     edges = np.flatnonzero(np.diff(np.concatenate(([0], missing.astype(int), [0]))))
+    starts, stops = edges[0::2], edges[1::2]
 
-    for start, stop in zip(edges[0::2], edges[1::2]):
-        touched = [(s, e) for s, e in spells if s < stop and e > start]
-        assert len(touched) == 1                             # one stoppage per gap
-        s, e = touched[0]
-        assert (start <= s and stop >= e) or (s <= start and stop <= e)
+    assert report["gaps_off_stoppage"] == 0 and len(starts) == report["gaps_placed"]
+    runs_on = 0
+    for start, stop in zip(starts, stops):
+        ahead = spell_starts[(spell_starts >= start) & (spell_starts <= start + lead)]
+        assert ahead.size == 1                               # its stoppage begins 0-1 s later
+        runs_on += truth[stop - 1] != "D"                    # ends in the play after it
+    assert runs_on > 0                                       # long cuts run on, not before
+
+
+def test_bad_stoppage_lead_is_refused():
+    section = {**STOPPAGE_GAPS, "placement": "stoppage"}
+    for lead in (None, -1.0, True, "1"):
+        with pytest.raises(ValueError, match="stoppage_lead_s"):
+            devset.degrade_ball(long_match(), {**section, "stoppage_lead_s": lead}, seed=0,
+                                truth=scripted_truth(long_match()))
 
 
 def test_stoppage_gaps_go_anywhere_once_every_stoppage_is_taken():
@@ -510,7 +526,8 @@ def test_random_placement_ignores_the_truth_so_earlier_results_reproduce():
 
 def test_stoppage_placement_needs_the_truth():
     with pytest.raises(ValueError, match="needs the truth"):
-        devset.degrade_ball(long_match(), {**DEGRADE, "placement": "stoppage"}, seed=0)
+        devset.degrade_ball(long_match(), {**DEGRADE, "placement": "stoppage",
+                                           "stoppage_lead_s": 1.0}, seed=0)
 
 
 def test_stoppage_placement_is_repeatable():
@@ -906,8 +923,8 @@ def cli_setup(tmp_path, monkeypatch):
     syn.write_idsse(data, "J03WTEST")
     dev_cfg = tmp_path / "devset.yaml"
     dev_cfg.write_text(
-        "seed: 0\nmatches: [J03WTEST]\ndegrade:\n  missing_share: 0.25\n  gaps:\n"
-        "    - {min_s: 0.2, max_s: 0.5, share: 1.0}\n"
+        "seed: 0\nmatches: [J03WTEST]\ndegrade:\n  missing_share: 0.25\n"
+        "  stoppage_lead_s: 1.0\n  gaps:\n    - {min_s: 0.2, max_s: 0.5, share: 1.0}\n"
     )
     monkeypatch.setenv("IDSSE_DATA_DIR", str(data))
     return dev_cfg
@@ -959,7 +976,7 @@ def test_main_gaps_flag_puts_the_gaps_over_stoppages(cli_setup, capsys):
     assert cli.main(["--devset", str(cli_setup), "--gaps", "stoppage",
                      "--config", str(base)]) == 0
     out = capsys.readouterr().out
-    assert "gaps over stoppages" in out and "of cut frames are dead ball" in out
+    assert "gaps starting with stoppages" in out and "of cut frames are dead ball" in out
 
 
 def test_main_summary_prints_counts_only(cli_setup, capsys):
