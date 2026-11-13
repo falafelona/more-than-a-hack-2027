@@ -1,7 +1,11 @@
 
+import copy
+import warnings
+
+import numpy as np
 import pytest
 
-from falafelona import deadball, io
+from falafelona import deadball, io, pipeline
 from falafelona.config import load_config
 
 # Read the real config files, so the tests break if a config stops working.
@@ -9,6 +13,8 @@ CONFIGS = io.vendor.REPO_ROOT / "configs"
 BALL_MISSING = load_config(CONFIGS / "baseline.yaml")
 OUT_OF_BOUNDS = load_config(CONFIGS / "exp" / "dead-out-of-bounds.yaml")
 PLAYERS_STILL = load_config(CONFIGS / "exp" / "dead-players-still.yaml")
+ALL_CLUES = load_config(CONFIGS / "exp" / "dead-combined.yaml")
+HMM_PAIR = load_config(CONFIGS / "exp" / "poss-hmm-margin-dead-combined.yaml")
 COMBINED = {
     "deadball": {
         "method": "combined",
@@ -145,3 +151,73 @@ def test_unknown_method_is_rejected(bundle):
     match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
     with pytest.raises(ValueError):
         deadball.detect(match, None, {"deadball": {"method": "nope"}})
+
+def test_out_of_bounds_uses_the_match_pitch(bundle):
+    # Dev-set matches have their own pitch size. On a bigger pitch the fake "out" ball is inside.
+    match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
+    match.pitch = (120.0, 80.0)
+    score = deadball.detect(match, None, OUT_OF_BOUNDS)
+    out_start, out_end = bundle["ball_out"]
+    assert (score[out_start:out_end] == 0).all()
+
+
+def test_players_still_with_no_speeds_is_never_still_and_quiet(bundle):
+    # If the speed field is empty, players_still must say "no evidence", not crash or warn.
+    match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
+    match.players_speed[:] = np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")          # any warning fails the test
+        score = deadball.detect(match, None, PLAYERS_STILL)
+    assert (score == 0).all()
+
+
+def test_combined_without_tags_just_loses_the_tag_clues(bundle):
+    # The dev set has no Smart Tagging: the tag clues give 0 and the rest works as usual.
+    match = io.load_match(n_frames=bundle["n_frames"], use_cache=False)
+    match.tags = []
+    no_tag_clues = copy.deepcopy(ALL_CLUES)
+    for clue in ("before_kickoff", "before_restart"):
+        del no_tag_clues["deadball"]["weights"][clue]
+
+    with_tag_clues = deadball.detect(match, None, ALL_CLUES)
+    without_them = deadball.detect(match, None, no_tag_clues)
+    assert (with_tag_clues == without_them).all()
+
+
+def _section(**changes):
+    """The shipped combined section with some keys changed (None removes a key)."""
+    section = copy.deepcopy(ALL_CLUES["deadball"])
+    for key, value in changes.items():
+        if value is None:
+            del section[key]
+        else:
+            section[key] = value
+    return section
+
+
+@pytest.mark.parametrize("section, message", [
+    (_section(method="nope"), "unknown deadball method"),
+    (_section(weights={"ball_missingg": 0.3}), "is not a clue"),
+    (_section(weights={"combined": 1.0}), "is not a clue"),
+    (_section(weights={"ball_missing": -0.3}), "must be a number >= 0"),
+    (_section(still_seconds=None), "needs 'still_seconds'"),
+    (_section(out_margin="1 m"), "must be a number >= 0"),
+    (_section(restart_seconds={"throw in": 8}), "is not a restart type"),
+    (_section(restart_seconds=None), "needs 'restart_seconds'"),
+])
+def test_config_mistakes_fail_with_a_clear_message(section, message):
+    with pytest.raises(ValueError, match=message):
+        deadball.check_config(section)
+
+
+def test_shipped_dead_configs_pass_the_check():
+    for cfg in (BALL_MISSING, OUT_OF_BOUNDS, PLAYERS_STILL, ALL_CLUES, HMM_PAIR):
+        deadball.check_config(cfg["deadball"])
+
+
+def test_hmm_with_the_combined_dead_score_runs_end_to_end(bundle, tmp_path):
+    # The pair from the 13 Nov review: the HMM reads the combined score as a chance of dead ball.
+    out = pipeline.run(HMM_PAIR, tmp_path / "out.csv", n_frames=bundle["n_frames"])
+    assert out["rows"] == bundle["n_frames"]
+    assert ((out["dead_score"] >= 0) & (out["dead_score"] <= 1)).all()
+    assert set(out["labels"]) <= {"H", "A", "D"}

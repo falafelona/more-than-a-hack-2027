@@ -2,28 +2,41 @@
 #
 # Output: score in 0..1 per frame, fed to the decoder in possession.py (docs/decisions.md D13).
 #
-# Ideas:
-# - ball out of bounds (pitch is 105.3 x 68 m)
-# - players static / slow for a while
-# - Smart Tagging set pieces and restarts (evidence, not truth; throw-ins have team N/A)
-# - official baseline: dead wherever the ball is not observed. Start here.
-# - second half: graded before its kickoff, and those frames are dead. Detect the kickoff from
-#   the Kick Off (Start) Smart Tag, never a hard-coded frame.
+# Clues (each is a method; `combined` adds them up with weights from the config):
+# - ball_missing: official baseline, dead wherever the ball is not observed
+# - out_of_bounds: ball clearly past a line of the match's own pitch
+# - players_still: players' average speed low for a while
+# - before_kickoff: graded second-half frames before its kickoff, found from the Kick Off (Start)
+#   Smart Tag, never a hard-coded frame
+# - before_restart: the seconds before each Smart Tagging restart (evidence, not truth;
+#   throw-ins have team N/A, and team is not used here)
 #
-# Methods are selected via the `deadball:` section of the config.
+# Methods are selected via the `deadball:` section of the config, which is checked up front.
+import warnings
+
 import numpy as np
 
 from falafelona.io import select_tags
-from falafelona.vendor import games
+
+METHODS = ("ball_missing", "out_of_bounds", "players_still", "before_kickoff", "before_restart",
+           "combined")
+# The Smart Tagging Type values that are restarts (DATA.md). Kick Off (Start) has its own method.
+RESTART_TYPES = ("throw-in", "corner kick", "goal kick", "free kick", "kick off (after goal)")
+# The settings each method reads from the config.
+SETTINGS = {
+    "out_of_bounds": ("out_margin",),
+    "players_still": ("still_speed", "still_seconds"),
+}
 
 
 class DeadBall:
     """Scores how likely each frame is dead ball (0 = alive, 1 = dead)."""
 
     def __init__(self, match, ball, cfg):
-        self.data = match              # the Match from io.load_match()
-        self.ball = ball               # cleaned ball from ball.py (not built yet, so None for now)
+        self.data = match              # the Match from io.load_match() (after ball cleaning)
+        self.ball = ball               # the BallTrack from ball.py, not used by any method yet
         self.cfg = cfg["deadball"]     # only our section of the config
+        check_config(self.cfg)         # a typo in the config fails here, with a clear message
 
     def score(self):
         """Run the method named in the config."""
@@ -49,12 +62,9 @@ class DeadBall:
         """Each clue adds its weight where it fires. The total is capped at 1."""
         total = np.zeros(self.data.n_frames)            # start every frame at 0 points
         for method, weight in self.cfg["weights"].items():
-            if method == "combined":                    # would call itself forever
-                raise ValueError("combined cannot be one of its own weights")
             total = total + weight * self.run(method)   # a clue adds its weight where it is 1
         total = np.minimum(total, 1.0)                  # never above 1
         return total
-
 
     def ball_missing(self):
         """Official baseline: dead (1.0) wherever the ball is not seen, alive (0.0) otherwise."""
@@ -65,7 +75,7 @@ class DeadBall:
 
     def out_of_bounds(self):
         """1.0 where the ball is clearly past a line (by more than out_margin), else 0.0."""
-        length, width = games.GAMES[games.GAME]["pitch"]
+        length, width = self.data.pitch                 # this match's pitch (dev-set ones differ)
         margin = self.cfg["out_margin"]
         ball_x = self.data.ball_xy[:,0] # ball position along the length
         ball_y = self.data.ball_xy[:,1] # ball position along the width
@@ -78,12 +88,17 @@ class DeadBall:
         return out
 
     def players_still(self):
-        """1.0 where the players' average speed stays below still_speed for still_seconds, else 0.0."""
+        """1.0 where the players' average speed stays below still_speed for still_seconds, else 0.0.
+
+        A frame with no speed at all gives no average, so it is never counted as still.
+        """
         threshold = self.cfg["still_speed"]
         min_frames = round(self.cfg["still_seconds"] * self.data.fps)   # seconds -> frames
         speeds = self.data.players_speed               # one row per frame, one column per player slot
-        average = np.nanmean(speeds, axis=1)           # one average per frame, empty slots skipped
-        still = average < threshold
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)   # numpy warns on frames with no speed
+            average = np.nanmean(speeds, axis=1)       # one average per frame, empty slots skipped
+        still = average < threshold                    # no average (NaN) gives False: not still
         still = keep_long_stretches(still, min_frames) # a short slow moment is not a stoppage
         still = still.astype(float)
         return still
@@ -111,6 +126,51 @@ class DeadBall:
         return dead
 
 
+def check_config(section):
+    """Stop early, with a clear message, if the `deadball:` section has a mistake."""
+    method = section.get("method")
+    if method not in METHODS:
+        raise ValueError(f"unknown deadball method : {method}; available: {', '.join(METHODS)}")
+
+    used = [method]                                    # the methods that will actually run
+    if method == "combined":
+        weights = section.get("weights")
+        if not isinstance(weights, dict) or not weights:
+            raise ValueError("deadball method combined needs 'weights': a clue name -> a number")
+        for clue in weights:
+            if clue == "combined" or clue not in METHODS:   # combined would call itself forever
+                raise ValueError(f"deadball.weights: {clue!r} is not a clue; "
+                                 f"available: {', '.join(m for m in METHODS if m != 'combined')}")
+            _number(weights, clue, f"deadball.weights.{clue}")
+        used = list(weights)
+
+    for clue in used:
+        for key in SETTINGS.get(clue, ()):
+            _number(section, key, f"deadball.{key}", needed_by=clue)
+
+    if "before_restart" in used:
+        restarts = section.get("restart_seconds")
+        if not isinstance(restarts, dict) or not restarts:
+            raise ValueError("deadball method before_restart needs 'restart_seconds': "
+                             "a restart type -> seconds")
+        for restart in restarts:
+            if restart.lower() not in RESTART_TYPES:   # a typo would silently match no tag
+                raise ValueError(f"deadball.restart_seconds: {restart!r} is not a restart type; "
+                                 f"available: {', '.join(RESTART_TYPES)}")
+            _number(restarts, restart, f"deadball.restart_seconds.{restart}")
+
+
+def _number(section, key, name, needed_by=None):
+    """A config value that must be a number >= 0."""
+    if key not in section:
+        raise ValueError(f"deadball method {needed_by} needs {key!r} in the config")
+    value = section[key]
+    if isinstance(value, bool) or not isinstance(value, int | float) or not np.isfinite(value) \
+            or value < 0:
+        raise ValueError(f"{name} must be a number >= 0, got {value!r}")
+    return value
+
+
 def keep_long_stretches(flags, min_frames):
     """Keep only the stretches of True that last at least min_frames frames in a row."""
     kept = np.zeros(len(flags), dtype=bool)
@@ -126,7 +186,7 @@ def keep_long_stretches(flags, min_frames):
         kept[start:] = True
     return kept
 
-        
+
 def detect(match, ball, cfg):
     """What pipeline.py calls (docs/architecture.md)."""
     return DeadBall(match, ball, cfg).score()
