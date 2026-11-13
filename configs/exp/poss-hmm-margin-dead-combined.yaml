@@ -20,7 +20,8 @@ deadball:
     out_of_bounds: 1.0    # strongest clue: enough on its own
     before_restart: 0.6   # enough on its own: before a tagged restart the ball is dead, even if players move
     players_still: 0.4    # not enough alone: a visible ball in play means alive. Dead with ball_missing
-    ball_missing: 0.3     # weak: the ball also goes missing in live play. Needs another clue
+    ball_missing: 0.6     # a gap alone leans dead (above the HMM's 0.5 line); other clues add confidence.
+                          # At 0.3 the HMM never called a gap dead (review of #38). Placeholder until the graded gap score (D15)
   out_margin: 1.0         # metres past the line before we call it out
   still_speed: 1.0        # m/s, a bit slower than walking pace
   still_seconds: 3        # how long the players must stay slow

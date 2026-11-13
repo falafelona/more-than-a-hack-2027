@@ -221,3 +221,10 @@ def test_hmm_with_the_combined_dead_score_runs_end_to_end(bundle, tmp_path):
     assert out["rows"] == bundle["n_frames"]
     assert ((out["dead_score"] >= 0) & (out["dead_score"] <= 1)).all()
     assert set(out["labels"]) <= {"H", "A", "D"}
+
+
+def test_a_ball_gap_alone_leans_dead_in_the_hmm_pair():
+    # Review of #38: the HMM calls D only above a dead score of 0.5. With ball_missing at 0.3 a
+    # gap with no other clue scored 0.3, so the HMM never called a gap dead ball, and on our
+    # match (player speeds possibly empty) no other clue would lift it. A gap alone must lean D.
+    assert HMM_PAIR["deadball"]["weights"]["ball_missing"] > 0.5
