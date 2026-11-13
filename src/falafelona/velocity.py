@@ -24,6 +24,22 @@ thresholds or windows in the code), checked by velocity_settings():
                     slows down, which is where takeovers are decided. 0 allows one-sided fits.
 To be tuned on the dev set (D15).
 
+PLAYERS: player_speed() does the same line fit for every player slot, from the slot's own
+positions, in metres per second. The ATD's players_speed field is not used for this: it may be
+mostly empty and its unit is still being checked (the same doubt as for the ball's).
+
+    speed = velocity.player_speed(match.players_xy, match.period, match.fps,
+                                  cfg["deadball"]["speed"])      # float[n, n_slots]
+
+Its settings are the three keys above plus one more, checked by player_speed_settings():
+    max_speed       m/s. A speed above this is dropped (NaN). The 46 slots are tracklets: when
+                    another player takes over a slot the position jumps, and a line fit across
+                    the jump gives a huge speed for a few frames. One such slot would lift the
+                    average speed of all players, so it is dropped. Set it above the fastest
+                    sprint (about 12 m/s).
+Nothing calls player_speed yet: deadball.players_still still reads match.players_speed until
+its owner switches over.
+
 No data is read here. The tests use made-up tracks.
 """
 
@@ -130,3 +146,52 @@ def ball_velocity(xy, period, fps, section):
             vxy[part] = _slopes(xy[part], **settings) * fps  # per frame -> per second
     speed = np.hypot(vxy[:, 0], vxy[:, 1])
     return vxy, speed
+
+
+def player_speed_settings(section, fps):
+    """Check a player speed block (the velocity keys plus max_speed) and turn it into frames.
+
+    Returns {"half_window": frames, "min_points": n, "min_each_side": n, "max_speed": m/s}.
+    Errors name the bad key and say they come from the player speed block, not from the
+    ball's `velocity:` block.
+    """
+    try:
+        settings = velocity_settings(section, fps)
+    except (TypeError, ValueError) as error:
+        raise type(error)(f"player speed block: {error}") from error
+    if "max_speed" not in section:
+        raise ValueError("player speed block: missing ['max_speed']")
+    cap = section["max_speed"]
+    if not _is_number(cap) or cap <= 0:
+        raise ValueError(f"player speed block: max_speed must be a positive number, got {cap!r}")
+    settings["max_speed"] = float(cap)
+    return settings
+
+
+def player_speed(xy, period, fps, section):
+    """Speed of every player slot on every frame, from the slot's positions, in m/s.
+
+    xy: float[n, n_slots, 2] metres (NaN = slot empty), as Match.players_xy.
+    period: int8[n] (1, 2, or 0 = ungraded). section: the player speed block, see
+    player_speed_settings. Returns float[n, n_slots].
+
+    Each slot is fitted on its own with the same line fit as the ball (ball_velocity), and each
+    half is handled on its own. A value is NaN where the slot is empty on that frame, where the
+    window has too few seen positions, outside the graded halves, and where the speed is above
+    max_speed (a tracklet that jumped, not a player who ran).
+    """
+    settings = player_speed_settings(section, fps)
+    cap = settings.pop("max_speed")
+    speed = np.full(xy.shape[:2], np.nan)
+    for half in (1, 2):
+        frames = np.flatnonzero(period == half)
+        if not frames.size:
+            continue
+        part = slice(frames[0], frames[-1] + 1)
+        for slot in range(xy.shape[1]):
+            track = xy[part, slot]
+            if np.isnan(track).all():                    # slot never used in this half
+                continue
+            slopes = _slopes(track, **settings) * fps    # per frame -> per second
+            speed[part, slot] = np.hypot(slopes[:, 0], slopes[:, 1])
+    return np.where(speed > cap, np.nan, speed)
