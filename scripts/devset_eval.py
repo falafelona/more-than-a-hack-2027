@@ -17,6 +17,8 @@
 #   --matches J03WPY J03WMX   only these matches (a quick run)
 #   --bootstrap N  a 5-95% interval for spellF1 only, computed per match with N draws (0 = off).
 #                  Slow: matches x configs x N draws. Use it for the final choice between configs.
+#   --tags         give each match simulated restart tags (configs/devset.yaml, tags:), so the
+#                  tag clues (before_restart, gap_chance restart_tag_after) can be judged
 #   --summary      only shapes and label counts per match (checks that the files load)
 #   --inspect FILE print the element and attribute NAMES of one IDSSE XML file (no values)
 # Prints aggregates only: no frame numbers, no positions, and it writes no files except the
@@ -51,6 +53,9 @@ def main(argv=None):
     parser.add_argument("--clean-ball", action="store_true", help="do not degrade the ball")
     parser.add_argument("--gaps", choices=devset.PLACEMENTS, default=None,
                         help="where the gaps go (default: degrade.placement in the devset config)")
+    parser.add_argument("--tags", action="store_true",
+                        help="give each match simulated restart tags (the tags section of the "
+                        "devset config), so the tag clues can be judged")
     parser.add_argument("--summary", action="store_true", help="only shapes and counts")
     parser.add_argument("--inspect", default=None, help="print the XML structure of one file")
     parser.add_argument(
@@ -69,6 +74,8 @@ def main(argv=None):
         return 0
 
     dev_cfg = load_dev_config(args.devset)
+    if args.tags and "tags" not in dev_cfg:
+        parser.error(f"--tags needs a 'tags' section in {args.devset}")
     if args.gaps:
         dev_cfg["degrade"] = {**dev_cfg["degrade"], "placement": args.gaps}
     ids = args.matches or dev_cfg["matches"]
@@ -87,7 +94,7 @@ def main(argv=None):
         parser.error("two configs have the same file name")
     degrade = not args.clean_ball
     result = devset.run_devset(
-        configs, dev_cfg, matches, degrade=degrade, bootstrap_n=args.bootstrap
+        configs, dev_cfg, matches, degrade=degrade, bootstrap_n=args.bootstrap, tags=args.tags
     )
     print(devset.format_report(result, degrade=degrade))
     return 0

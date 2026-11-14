@@ -11,6 +11,7 @@
 #                    config is the reference. Default: baseline vs final. Another pair:
 #                    make devset CONFIGS="configs/final.yaml configs/exp/x.yaml"
 #                    make devset GAPS=stoppage   gaps over dead-ball spells instead of at random
+#                    make devset TAGS=1   simulated restart tags, to judge the tag clues
 #
 # `submission`, `validate` and `devset` read real data or real outputs: humans run them, not AI agents.
 
@@ -54,7 +55,7 @@ validate:
 
 devset:
 	@test -n "$$IDSSE_DATA_DIR" || { echo "IDSSE_DATA_DIR is not set (experiments/README.md)"; exit 1; }
-	$(PY) scripts/devset_eval.py --config $(CONFIGS) $(if $(GAPS),--gaps $(GAPS))
+	$(PY) scripts/devset_eval.py --config $(CONFIGS) $(if $(GAPS),--gaps $(GAPS)) $(if $(TAGS),--tags)
 
 clean:
 	rm -rf .pytest_cache .ruff_cache build src/*.egg-info

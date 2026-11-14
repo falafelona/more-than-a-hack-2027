@@ -58,7 +58,7 @@ import numpy as np
 
 from falafelona import deadball, possession, vendor
 from falafelona.ball import DataCleaner
-from falafelona.io import Match, read_cache, write_cache
+from falafelona.io import Event, Match, read_cache, write_cache
 from falafelona.pipeline import apply_x_policy
 
 pm = vendor.possession_metrics
@@ -633,6 +633,142 @@ def match_seed(base_seed, match_id):
     return int(sequence.generate_state(1)[0])
 
 
+# --- simulated restart tags (review finding 2) -------------------------------------------------
+#
+# IDSSE has no Smart Tagging, so on the dev set every tag clue (deadball before_restart, and
+# gap_chance's restart_tag_after) gives 0 and cannot be judged. With `--tags` each dev match gets
+# restart tags made from its own truth, so these clues can be compared like any other change.
+#
+# How a tag is made:
+# - Candidates are the dead-ball spells of the truth, inside a half, at least min_dead_s long.
+#   A spell that starts on the first frame of a half is the kickoff of that half (Kick Off
+#   (Start), not a restart) and is skipped.
+# - Its type comes from where the (undegraded) ball is on the first live frame after the spell,
+#   the moment the restart is taken: near the centre spot a kickoff after a goal, near a corner
+#   a corner kick, near a touchline a throw-in, in front of a goal a goal kick, else a free
+#   kick. restart_type() has the rules.
+# - How many of each type: the same number per graded frame as Smart Tagging has on OUR match
+#   (dead-ball EDA #28: 26 throw-ins, 12 corners, 10 goal kicks, 5 free kicks, 5 kickoffs), so
+#   the tags are as sparse as ours. Drawn at random from that type's candidates; if a match has
+#   fewer, all are used and the report counts the shortfall.
+# - The tag starts on the frame the ball comes alive, plus a random offset in offset_s. Our tags
+#   are assumed to start as the restart is taken (that is what before_restart assumes too). The
+#   real offset of our tags is NOT measured: change offset_s if a human-run EDA measures it.
+# Assumptions, so a win with tags is weaker evidence than a win without: types are always right,
+# there are no false tags, and the DFL dead-ball flag stands in for the restarts. The tags are
+# drawn with their own seed, so --tags leaves the degraded ball exactly as it was.
+
+TAG_TYPES = deadball.RESTART_TYPES
+
+
+def _tag_settings(section, fps):
+    """Check the `tags:` section of configs/devset.yaml. Returns plain numbers (frames, metres)."""
+    if not isinstance(section, dict) or not section:
+        raise ValueError("devset config: --tags needs a 'tags' section (configs/devset.yaml)")
+    counts = section.get("our_counts")
+    if not isinstance(counts, dict) or set(counts) != set(TAG_TYPES):
+        raise ValueError(f"devset config: tags.our_counts must give a count for each of "
+                         f"{', '.join(TAG_TYPES)}")
+    out = {"counts": {}}
+    for kind in TAG_TYPES:
+        out["counts"][kind] = _tag_number(counts[kind], f"tags.our_counts.{kind}")
+    graded = _tag_number(section.get("our_graded_frames"), "tags.our_graded_frames")
+    if graded <= 0:
+        raise ValueError("devset config: tags.our_graded_frames must be above 0")
+    out["our_graded_frames"] = graded
+    for key in ("min_dead_s", "centre_m", "corner_m", "touchline_m", "goal_area_m",
+                "goal_area_half_width_m"):
+        out[key] = _tag_number(section.get(key), f"tags.{key}")
+    out["min_dead"] = max(1, round(out.pop("min_dead_s") * fps))
+    offset = section.get("offset_s")
+    if not isinstance(offset, list | tuple) or len(offset) != 2 \
+            or any(isinstance(v, bool) or not isinstance(v, int | float) for v in offset) \
+            or offset[0] > offset[1]:
+        raise ValueError(f"devset config: tags.offset_s must be [low, high] seconds with low <= "
+                         f"high, got {offset!r}")
+    out["offset"] = (round(offset[0] * fps), round(offset[1] * fps))
+    return out
+
+
+def _tag_number(value, name):
+    """A number >= 0 from the tags section."""
+    if isinstance(value, bool) or not isinstance(value, int | float) or not value >= 0:
+        raise ValueError(f"devset config: {name} must be a number >= 0, got {value!r}")
+    return float(value)
+
+
+def restart_type(point, pitch, settings):
+    """The restart taken with the ball at `point` (metres from the corner), or None if unseen.
+
+    In this order: within centre_m of the centre spot a kickoff after a goal; within corner_m of
+    both a goal line and a touchline a corner kick; within touchline_m of a touchline (or past
+    it) a throw-in; within goal_area_m of a goal line and goal_area_half_width_m of the middle
+    a goal kick; anywhere else a free kick.
+    """
+    if point is None or np.isnan(point).any():
+        return None
+    length, width = pitch
+    x, y = float(point[0]), float(point[1])
+    to_goal_line = min(x, length - x)
+    to_touchline = min(y, width - y)
+    if np.hypot(x - length / 2, y - width / 2) <= settings["centre_m"]:
+        return "kick off (after goal)"
+    if to_goal_line <= settings["corner_m"] and to_touchline <= settings["corner_m"]:
+        return "corner kick"
+    if to_touchline <= settings["touchline_m"]:
+        return "throw-in"
+    if to_goal_line <= settings["goal_area_m"] \
+            and abs(y - width / 2) <= settings["goal_area_half_width_m"]:
+        return "goal kick"
+    return "free kick"
+
+
+def _restart_ball(ball_xy, frame, stop, look):
+    """The first seen ball from `frame` on, at most `look` frames on and before `stop`."""
+    for i in range(frame, min(frame + look, stop)):
+        if not np.isnan(ball_xy[i]).any():
+            return ball_xy[i]
+    return None
+
+
+def simulate_tags(match, truth, section, seed):
+    """Restart tags for one dev match, made from its truth. Returns (tags, report).
+
+    match: the UNDEGRADED match (its ball says where each restart is taken). truth: str[n].
+    tags: list[Event] sorted by start, like io.load_match gives. The report holds counts only:
+    tags made, and how many fewer than our rate the match had candidates for.
+    """
+    settings = _tag_settings(section, match.fps)
+    rng = np.random.default_rng(seed)
+    ranges = _half_ranges(match.period)
+    graded = sum(stop - start for start, stop in ranges)
+    by_type = {kind: [] for kind in TAG_TYPES}
+    for start, stop, low, high in _stoppages(truth, ranges):
+        if start == low or stop >= high or stop - start < settings["min_dead"]:
+            continue                       # the half's own kickoff, or no restart inside the half
+        point = _restart_ball(match.ball_xy, stop, high, round(match.fps))
+        kind = restart_type(point, match.pitch, settings)
+        if kind is not None:
+            by_type[kind].append((stop, high))
+
+    low_offset, high_offset = settings["offset"]
+    tags, short = [], 0
+    for kind in TAG_TYPES:
+        wanted = round(settings["counts"][kind] * graded / settings["our_graded_frames"])
+        found = by_type[kind]
+        short += max(0, wanted - len(found))
+        picked = rng.permutation(len(found))[:wanted]
+        for i in sorted(picked):
+            live, high = found[i]
+            start = int(np.clip(live + rng.integers(low_offset, high_offset + 1), 0, high - 1))
+            after = truth[live]
+            team = after if kind != "throw-in" and after in ("H", "A") else None   # like ours
+            tags.append(Event(start=start, end=start + 1, code="SET PIECES", type=kind,
+                              team=team, half=int(match.period[live])))
+    tags.sort(key=lambda tag: tag.start)
+    return tags, {"tags": len(tags), "tags_short": short}
+
+
 # --- running the pipeline and scoring ----------------------------------------------------------
 
 
@@ -717,11 +853,13 @@ def _stage_key(cfg):
     return json.dumps(rest, sort_keys=True, default=str)
 
 
-def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0):
+def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0, tags=False):
     """Score every config on every match. The degraded ball is the same for every config.
 
     configs: {name: loaded pipeline config}. matches: list of DevMatch.
     bootstrap_n: spellF1 bootstrap draws per match (0 = off, it is slow).
+    tags: give every match simulated restart tags (simulate_tags, dev_cfg["tags"]). They are
+    drawn with their own seed, so the degraded ball is the same with or without them.
     Returns {"matches": {id: {"ball_missing": share, **report}}, "scores": {name: {id: score}}}.
     """
     out = {"matches": {}, "scores": {name: {} for name in configs}}
@@ -734,6 +872,11 @@ def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0):
         else:
             graded = match.period > 0
             report = {"missing_share": float(np.isnan(match.ball_xy[graded, 0]).mean())}
+        if tags:
+            seed = match_seed(dev_cfg["seed"], f"{dev.match_id}/tags")
+            made, tag_report = simulate_tags(dev.match, dev.truth, dev_cfg.get("tags"), seed)
+            match = replace(match, tags=made)
+            report = {**report, **tag_report}
         out["matches"][dev.match_id] = report
         prepared = {}  # stage key -> stages, for this match only
         for name, cfg in configs.items():
@@ -853,6 +996,9 @@ def format_report(result, degrade=True):
         f"{', '.join(where[p] for p in sorted(placements))}" if degrade
         else "ball: as tracked, NOT degraded (an upper bound)"
     )
+    if any("tags" in r for r in result["matches"].values()):
+        lines.append("restart tags: SIMULATED from the truth at our match's rate (types always "
+                     "right, no false tags, offset assumed), so a tag-clue win is weaker evidence")
     for match_id, report in result["matches"].items():
         extra = ""
         if "gaps_placed" in report:
@@ -866,6 +1012,10 @@ def format_report(result, degrade=True):
                 extra += f", {report['false_stretches']} false stretches"
             if report["gaps_unplaced"]:
                 extra += f", {report['gaps_unplaced']} bins ran out of room"
+        if "tags" in report:
+            extra += f", {report['tags']} restart tags"
+            if report["tags_short"]:
+                extra += f" ({report['tags_short']} fewer than our rate: too few stoppages)"
         share = report["missing_share"]
         shown = "n/a" if share is None else f"{100 * share:.1f}%"
         lines.append(f"  {match_id}: ball missing {shown}{extra}")
