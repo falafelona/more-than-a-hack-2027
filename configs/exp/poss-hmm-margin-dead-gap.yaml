@@ -1,0 +1,61 @@
+# Experiment: the HMM decoder with the GRADED gap score (gap_chance), tested as ONE pair (code
+# review 13 Nov, item 1). Copy of poss-hmm-margin-dead-combined.yaml with ball_missing (a flat 0.6
+# on every gap, so every gap longer than about 1 s became D) replaced by gap_chance: one chance per
+# gap, so a gap with no sign of a stoppage stays under the HMM's 0.5 line and keeps its possession.
+# players_still is not a separate clue here: it is one of gap_chance's clues.
+# Run against final.yaml AND against poss-hmm-margin-dead-combined.yaml, under both gap cuts
+# (random and stoppage) and 2 seeds. All numbers are PLACEHOLDERS until chosen on other matches (D15).
+seed: 0
+
+ball:
+  method: interpolate     # dev set: same score as none (+0.000), kept as the simplest gap filler (RESULTS.md)
+  max_gap: 0.5            # s: fill gaps up to this long with a straight line; longer gaps stay missing
+  max_speed: 40.0         # m/s: do not fill a gap if the ball could not have crossed it this fast
+  speed_slack: 1.0        # m: tracking noise allowed on top of max_speed * time
+
+deadball:
+  method: combined        # chance the ball is dead: each clue adds its weight where it fires, capped at 1
+  weights:
+    before_kickoff: 1.0   # certain: graded second-half frames before its kickoff are always dead
+    out_of_bounds: 1.0    # strongest clue: enough on its own
+    before_restart: 0.6   # enough on its own: before a tagged restart the ball is dead, even if players move
+    gap_chance: 1.0       # already a chance (0-1) inside each ball gap, 0 where the ball is seen
+  out_margin: 1.0         # metres past the line before we call it out
+  still_speed: 1.0        # m/s: players' median speed below this counts as standing (gap clue players_still)
+  speed:                  # player speed from positions (velocity.player_speed); the ATD speed field is not used
+    half_window_s: 0.2    # s on each side of the frame: the line fit averages out tracking jitter
+    min_points: 5         # seen positions needed in that window
+    min_each_side: 2      # seen positions needed before AND after the frame
+    max_speed: 12.0       # m/s, above any sprint: a bigger jump is a tracklet swap, so the track is cut there
+  gap:                    # gap_chance: log-odds added up per gap, then turned into a chance (0-1)
+    intercept: -1.0       # a 1 s gap with no clue: chance 0.27
+    length_weight: 0.25   # added per doubling of the gap's length: 8 s alone gives 0.44, 32 s gives 0.56
+    line_distance: 2.0    # m: "near a line" (ball EDA: 32% of gaps start within 2 m of a line, 9% of frames)
+    spot_distance: 3.0    # m: "at the centre spot"
+    tag_seconds: 5.0      # s: a restart tag this soon after the gap counts
+    weights:              # log-odds each clue adds where it holds; 0 switches a clue off
+      last_seen_near_line: 1.0    # an 8 s gap last seen near a line: 0.68
+      reappears_near_line: 1.0    # throw-in, corner or goal kick taken near a line
+      reappears_at_centre: 1.5    # kickoff after a goal
+      players_still: 2.0          # x the share of the gap with the players standing: all still, 8 s: 0.85
+      restart_tag_after: 0.0      # OFF: the dev set has no tags, so it cannot be tested (review finding 2)
+  restart_seconds:        # seconds of dead ball before each restart tag. Too long reaches into live play
+    throw-in: 8
+    corner kick: 15
+    goal kick: 20
+    free kick: 25
+    kick off (after goal): 45   # includes the celebration
+
+possession:
+  method: hmm
+  team_evidence: margin   # distance margin between the nearest home and away players
+  team_cost: 0.5          # weight of the margin evidence
+  margin_scale: 1.0       # m: a 3 m margin is about 95% sure
+  near_distance: 5.0      # m: nearest player this far away = no evidence
+  dead_weight: 2.0        # how strongly the dead score pulls towards D (and away from H / A)
+  switch_cost: 10.0       # cost of a change between H and A
+  to_dead_cost: 6.0       # cost of going from H or A into D
+  from_dead_cost: 6.0     # cost of leaving D for H or A
+
+output:
+  x_policy: none          # D14 still proposed: no X written yet
