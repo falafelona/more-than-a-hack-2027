@@ -5,7 +5,7 @@ Team **Falafelona**'s entry for [More Than a Hack 2027](https://landing.mobilewo
 
 **Team:** Chikhani · Tala · Dudu · Laila · Abdallah
 
-**Status:** pipeline in progress. Baseline to beat: spellF1 **0.2433**.
+**Status:** pipeline complete and validated (199,319 rows). The submitted configuration is chosen on the IDSSE dev set and frozen on 15–16 Nov. Baseline to beat: spellF1 **0.2433**.
 
 ## The task
 
@@ -34,7 +34,7 @@ The tracking is automatic and uncorrected, has no player identities, and the bal
 tracking data
   → clean the ball track            ball.py
   → dead-ball score                 deadball.py
-  → per-frame team evidence         possession.py
+  → per-frame team evidence         possession.py   (uses ball velocity, velocity.py)
   → H/A/D decoder                   possession.py
   → final labels                    pipeline.py
   → Falafelona.csv
@@ -44,11 +44,11 @@ tracking data
 
 The decoder uses three states because every graded frame is `H`, `A` or `D`. Where we write `X` is still being decided (D14).
 
-See [docs/architecture.md](docs/architecture.md) for the stages and [docs/decisions.md](docs/decisions.md) for why.
+**How settings are chosen.** We have no answers for this match and may not tune on it, so every setting is chosen on the seven open IDSSE matches (dev set), with the ball cut to look like ours. A change is kept only if it wins by more than 0.04 spellF1 under both kinds of simulated gaps (D17, D18). Results are in [experiments/RESULTS.md](experiments/RESULTS.md).
+
+See [docs/architecture.md](docs/architecture.md) for the stages, [docs/decisions.md](docs/decisions.md) for why, and [docs/Falafelona.md](docs/Falafelona.md) for the technical document.
 
 ## Reproduce our submission
-
-> Commands are placeholders until the pipeline is complete.
 
 ```bash
 git clone --recurse-submodules https://github.com/falafelona/more-than-a-hack-2027
