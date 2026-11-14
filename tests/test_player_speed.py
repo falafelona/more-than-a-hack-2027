@@ -8,7 +8,7 @@ import warnings
 import numpy as np
 import pytest
 
-from falafelona.velocity import ball_velocity, player_speed, player_speed_settings
+from falafelona.velocity import _pieces, ball_velocity, player_speed, player_speed_settings
 
 FPS = 25.0
 N = 100
@@ -59,18 +59,44 @@ def test_empty_slots_raise_no_warning():
     assert np.isnan(speed).all()
 
 
-# Another player takes over a slot, so the position jumps 30 m between two frames. A line fit
-# across the jump reads far above any sprint; max_speed drops those frames and only those.
-def test_jump_is_dropped_by_max_speed():
+# Another player takes over a slot, so the position jumps 30 m between two frames. The track is
+# cut there: both sides keep their true speed, and only the frame on each side of the cut (its
+# window sees one side only) gets none. Without the cut, a fit across the jump reads 200 m/s.
+def test_a_big_jump_cuts_the_track():
     xy = empty_slots(N, 1)
     xy[:, 0] = straight_line(N, 3.0, 0.0)
     xy[50:, 0, 0] += 30.0                            # slot continues somewhere else
-    loose = player_speed(xy, GRADED, FPS, {**SETTINGS, "max_speed": 1000.0})
-    capped = player_speed(xy, GRADED, FPS, SETTINGS)
-    assert loose[49, 0] > 100.0                      # without the cap the jump looks like 200 m/s
-    assert np.isnan(capped[48:52, 0]).all()          # every window that contains the jump
-    assert np.allclose(capped[1:48, 0], 3.0)
-    assert np.allclose(capped[52:-1, 0], 3.0)
+    loose = player_speed(xy, GRADED, FPS, {**SETTINGS, "max_speed": 1000.0})   # no cut, no cap
+    speed = player_speed(xy, GRADED, FPS, SETTINGS)
+    assert loose[49, 0] > 100.0
+    assert np.isnan(speed[[49, 50], 0]).all()
+    assert np.allclose(speed[1:49, 0], 3.0)
+    assert np.allclose(speed[51:-1, 0], 3.0)
+
+
+# The case the cap alone misses: a standing player's slot is taken over by someone 3 m away.
+# A line fit across that step reads about 10 m/s for several frames, under max_speed. One such
+# slot per team in a stoppage is enough to blur it, so the jump must cut the track.
+def test_a_small_jump_under_max_speed_is_cut_too():
+    n = 100
+    xy = np.full((n, 1, 2), [50.0, 30.0])
+    xy[50:, 0, 0] += 3.0
+    section = {"half_window_s": 0.2, "min_points": 5, "min_each_side": 2, "max_speed": 12.0}
+    loose = player_speed(xy, np.ones(n, dtype=np.int8), FPS, {**section, "max_speed": 1000.0})
+    speed = player_speed(xy, np.ones(n, dtype=np.int8), FPS, section)
+    assert 5.0 < np.nanmax(loose) < 12.0             # no cut: a run, and the cap would keep it
+    assert np.nanmax(speed) < 1e-9                   # cut: standing still on both sides
+
+
+# A slot can vanish for a while. It is only cut if it reappears further away than a player
+# could have run in that time.
+def test_a_slot_that_reappears_within_reach_is_not_cut():
+    track = np.full((N, 2), np.nan)
+    track[:40] = [10.0, 10.0]
+    track[65:] = [18.0, 10.0]                        # 8 m in 25 frames (1 s): 8 m/s, possible
+    assert _pieces(track, 12.0 / FPS) == [(0, N)]
+    track[65:] = [30.0, 10.0]                        # 20 m in 1 s: another player
+    assert _pieces(track, 12.0 / FPS) == [(0, 65), (65, N)]
 
 
 # Frames outside the graded halves get no speed, and a window never mixes the two halves.
