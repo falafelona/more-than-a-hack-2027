@@ -10,10 +10,12 @@ Sections marked **[to fill]** are completed after the team freeze (15–16 Nov).
 
 **The problem.** The ranking metric, spellF1, scores whole possessions: a predicted possession
 counts only if it overlaps a true one well. A single wrong frame in the middle of a possession
-splits it in two, and both halves usually miss. We measured this on synthetic labels: two
-3-frame flicker blips per minute cut spellF1 to 0.61 while frame accuracy (macroF1) stays at
-0.997, whereas switching up to 8 frames late costs almost nothing (0.98). So the main job is not
-a better guess on each frame; it is **producing few, clean possessions** (decision D13).
+splits it in two, and both halves usually miss. We measured this on synthetic labels
+(`scripts/metric_study.py`): two 3-frame flicker blips per minute cut spellF1 to 0.61 while
+frame accuracy (macroF1) stays at 0.997. Timing matters too, but less: the organisers' own table
+(EVALUATION.md) gives 0.98 for a perfect answer 3 frames late, 0.89 for 8 frames and 0.65 for one
+second. So the main job is not a better guess on each frame; it is **producing few, clean
+possessions, switched at the right moment** (decision D13).
 
 **The pipeline.**
 
@@ -66,9 +68,12 @@ a line (67 stretches). "Nearby" means from 10 s before a restart to 2 s after it
 
 So a long ball gap is a strong hint of a stoppage but a bad rule: most stoppages come with one,
 yet most long gaps are the ball lost in live play. Calling every gap `D` would split many
-possessions. Longer gaps are more often stoppages, and 32% of gaps start with the ball within 2 m
-of a line (against 9% of seen frames), so gap length and "last seen near a line" are better
-evidence than "the ball is missing". This is why dead ball is a graded score fed to the decoder.
+possessions. Restarts are frequent, so a gap can sit near one by chance; against that chance
+level, gaps over 20 s are near a restart much more often (0.61 against 0.33) and gaps of 5–20 s
+barely more (0.25 against 0.20) [Tala to confirm these two from the final EDA run]. And 32% of
+gaps start with the ball within 2 m of a line, against 9% of seen frames. So gap length and
+"last seen near a line" are better evidence than "the ball is missing". This is why dead ball is
+a graded score fed to the decoder.
 
 ## 2. Assets used (and dropped)
 Owner: Tala. [to fill]
@@ -82,8 +87,10 @@ pipeline works (it reproduces the official baseline's score), never to choose be
 
 **Dev set: IDSSE.** Every setting is chosen on the IDSSE dataset [1]: seven full professional
 matches from the German Bundesliga and 2. Bundesliga, 2022/23, tracked at 25 Hz, released under
-CC BY 4.0. The organisers approved its use (official challenge repository, issue #16). We did not
-label it ourselves.
+CC BY 4.0. The organisers approved its use (official challenge repository, issue #16).
+**Who labelled it, and how much:** the labels come with the dataset, from the league's official
+tracking data; we labelled nothing ourselves. We use all seven matches, every frame of both
+halves.
 
 - **Truth.** IDSSE's own tracking states, for every frame, whether the ball is in play
   (`BallStatus`) and which team owns it (`BallPossession`). Ball alive gives `H` or `A` from that
@@ -115,7 +122,7 @@ decoder and settings.]
 | Controlled possession by the other team | A change of possession | Sustained evidence (the other team clearly closer to the ball over several frames) pays the switch cost |
 | Aerial duel | Not a change without control | Our tracking has no ball height, so we cannot see the ball in the air. A fast ball (ball velocity per frame) counts as a pass, not as control [Dudu: fast-ball rule, final?] |
 | Restart after a stoppage | There is a clear possessor | Play resumes from `D` to the team the evidence supports after the restart |
-| Dead ball | Always `D`, never a possession | The dead-ball score pulls the decoder towards `D`; second-half frames before its kickoff are `D` (from the Kick Off (Start) tag, never a fixed frame) |
+| Dead ball | Always `D`, never a possession | The dead-ball score pulls the decoder towards `D`; second-half frames before its kickoff are `D`, found from the Kick Off (Start) tag, never a fixed frame (added to the final configuration at the freeze) |
 | Abstaining (`X`) | `X` on a graded frame is a miss | We write no `X` [D14, to confirm] |
 
 ## 5. Results
@@ -130,16 +137,17 @@ score, statistics on our match that need no answers, and the public five-minute 
 | Full-match spellF1 / macroF1 (published by the organisers) | 0.2433 / 0.6724 |
 | Public 5-minute check, spellF1 / macroF1 | 0.326 / 0.621 |
 | Dev-set spellF1, random / stoppage gaps | 0.212 / 0.269 |
-| Possessions on our match | 669 (5.61 per graded minute) |
+| Possessions on our match | 669 |
 | Median possession length | 4.7 s |
 | Possessions shorter than 1 s | 132 |
-| Agreement with Smart Tagging's attacking phases | 0.68 |
 
-A real match has about 3.4 possessions per minute (the public five minutes hold 17, averaging
-14.2 s). The baseline reports far more, mostly short ones: it splits real possessions.
+For comparison, the public five minutes hold 17 possessions averaging 14.2 s, and the IDSSE
+matches hold 370–511 possessions of 5.5–9.2 s each. The baseline reports more possessions than
+either, and one in five lasts under a second: it splits real possessions.
 
 **Candidates on the dev set** (change in spellF1 against the reference, random / stoppage gaps,
-and on how many of the 7 matches it was better):
+seed 0, and on how many of the 7 matches it was better). Full rows, including seed 1, are in
+`experiments/RESULTS.md`.
 
 | Version | random | stoppage | Verdict |
 |---|---|---|---|
@@ -147,7 +155,9 @@ and on how many of the 7 matches it was better):
 | Ball: Kalman smoother | +0.000 to +0.001 | — | dropped: same as interpolate |
 | Possession: switch cost | −0.003 (3/7) | +0.008 (5/7) | dropped: noise |
 | Possession: HMM, nearest team | −0.012 (1/7) | +0.008 (5/7) | dropped: noise |
-| Possession: HMM, distance margin | −0.006 (1/7) | +0.038 (7/7) | best candidate, retuned before the freeze |
+| Possession: HMM, distance margin | −0.006 (1/7) | +0.038 (7/7) | dropped alone: no gain under random gaps |
+| HMM margin + flat dead score | +0.006 (4/7) | +0.045 (7/7) | dropped: no gain under random gaps |
+| HMM margin + graded gap score | +0.022 (7/7) | +0.047 (7/7) | best candidate so far, not in: the random-gap gain is below 0.04, and 5/7 on seed 1 |
 
 [to fill after the freeze: final retuned results, the submitted version against the baseline,
 and the same match statistics as above for the submitted file.]
@@ -169,6 +179,11 @@ and the same match statistics as above for the submitted file.]
 - **Smart Tagging is evidence, not truth.** It is automatic and unreviewed, sparse (5 free kicks
   in the match), and every throw-in has no team.
 - [ball, dead ball, possession: one line each from their owners]
+
+**With more time** we would: test the restart-tag clues on a dev set with simulated tags;
+simulate tracklet swaps and missing players on the dev set; and retune the decoder so the
+number and length of possessions match the truth (ours are still too few and too long on the
+dev set).
 
 ## 7. Reproduction
 Owner: Tala. [to fill: one command, SHA-256 of the file, runtime and machine]
