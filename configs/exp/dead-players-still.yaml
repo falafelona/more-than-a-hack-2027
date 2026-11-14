@@ -6,9 +6,14 @@ ball:
   method: none            # no gap filling, no rejection
 
 deadball:
-  method: players_still   # score 1 where the players' average speed stays low for a while, else 0
+  method: players_still   # score 1 where the players' median speed stays low for a while, else 0
   still_speed: 1.0        # m/s, a bit slower than walking pace. A guess until tuned on other matches (D15)
   still_seconds: 3        # how long it must stay slow; a shorter slow moment happens in live play too
+  speed:                  # player speed from positions (velocity.player_speed); the ATD speed field is not used
+    half_window_s: 0.2    # s on each side of the frame: the line fit averages out tracking jitter
+    min_points: 5         # seen positions needed in that window
+    min_each_side: 2      # seen positions needed before AND after the frame
+    max_speed: 12.0       # m/s, above any sprint: a bigger jump is a tracklet swap, so the track is cut there
 
 possession:
   method: nearest_majority
