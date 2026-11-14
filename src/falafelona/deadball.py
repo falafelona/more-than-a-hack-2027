@@ -5,7 +5,8 @@
 # Clues (each is a method; `combined` adds them up with weights from the config):
 # - ball_missing: official baseline, dead wherever the ball is not observed
 # - out_of_bounds: ball clearly past a line of the match's own pitch
-# - players_still: players' average speed low for a while
+# - players_still: players' typical (median) speed low for a while, speed computed from their
+#   positions (velocity.player_speed, the `speed:` block), not from the ATD's speed field
 # - before_kickoff: graded second-half frames before its kickoff, found from the Kick Off (Start)
 #   Smart Tag, never a hard-coded frame
 # - before_restart: the seconds before each Smart Tagging restart (evidence, not truth;
@@ -16,6 +17,7 @@ import warnings
 
 import numpy as np
 
+from falafelona import velocity
 from falafelona.io import select_tags
 
 METHODS = ("ball_missing", "out_of_bounds", "players_still", "before_kickoff", "before_restart",
@@ -27,6 +29,8 @@ SETTINGS = {
     "out_of_bounds": ("out_margin",),
     "players_still": ("still_speed", "still_seconds"),
 }
+# players_still also needs the player speed block `speed:` (velocity.player_speed_settings).
+SPEED_KEYS = (*velocity.SETTING_KEYS, "max_speed")
 
 
 class DeadBall:
@@ -36,7 +40,7 @@ class DeadBall:
         self.data = match              # the Match from io.load_match() (after ball cleaning)
         self.ball = ball               # the BallTrack from ball.py, not used by any method yet
         self.cfg = cfg["deadball"]     # only our section of the config
-        check_config(self.cfg)         # a typo in the config fails here, with a clear message
+        check_config(self.cfg, match.fps)   # a typo in the config fails here, with a clear message
 
     def score(self):
         """Run the method named in the config."""
@@ -88,17 +92,22 @@ class DeadBall:
         return out
 
     def players_still(self):
-        """1.0 where the players' average speed stays below still_speed for still_seconds, else 0.0.
+        """1.0 where the players' median speed stays below still_speed for still_seconds, else 0.0.
 
-        A frame with no speed at all gives no average, so it is never counted as still.
+        Speeds come from the players' positions (velocity.player_speed with the `speed:` block),
+        in m/s on both our match and the dev set. The ATD's own speed field is not used: its unit
+        is not checked and it may be mostly empty. The median, not the mean, so a few players
+        jogging back into position during a stoppage do not hide it. A frame where no player has
+        a speed gives no median, so it is never counted as still.
         """
         threshold = self.cfg["still_speed"]
         min_frames = round(self.cfg["still_seconds"] * self.data.fps)   # seconds -> frames
-        speeds = self.data.players_speed               # one row per frame, one column per player slot
+        speeds = velocity.player_speed(self.data.players_xy, self.data.period, self.data.fps,
+                                       self.cfg["speed"])   # one row per frame, one column per slot
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)   # numpy warns on frames with no speed
-            average = np.nanmean(speeds, axis=1)       # one average per frame, empty slots skipped
-        still = average < threshold                    # no average (NaN) gives False: not still
+            typical = np.nanmedian(speeds, axis=1)     # one median per frame, empty slots skipped
+        still = typical < threshold                    # no median (NaN) gives False: not still
         still = keep_long_stretches(still, min_frames) # a short slow moment is not a stoppage
         still = still.astype(float)
         return still
@@ -126,8 +135,13 @@ class DeadBall:
         return dead
 
 
-def check_config(section):
-    """Stop early, with a clear message, if the `deadball:` section has a mistake."""
+def check_config(section, fps=None):
+    """Stop early, with a clear message, if the `deadball:` section has a mistake.
+
+    fps: the match's frame rate. With it, the player speed block is checked in full (its window
+    is set in seconds and checked in frames); without it, only that its keys are there.
+    DeadBall always passes it.
+    """
     method = section.get("method")
     if method not in METHODS:
         raise ValueError(f"unknown deadball method : {method}; available: {', '.join(METHODS)}")
@@ -148,6 +162,9 @@ def check_config(section):
         for key in SETTINGS.get(clue, ()):
             _number(section, key, f"deadball.{key}", needed_by=clue)
 
+    if "players_still" in used:
+        _check_speed_block(section.get("speed"), fps)
+
     if "before_restart" in used:
         restarts = section.get("restart_seconds")
         if not isinstance(restarts, dict) or not restarts:
@@ -158,6 +175,22 @@ def check_config(section):
                 raise ValueError(f"deadball.restart_seconds: {restart!r} is not a restart type; "
                                  f"available: {', '.join(RESTART_TYPES)}")
             _number(restarts, restart, f"deadball.restart_seconds.{restart}")
+
+
+def _check_speed_block(block, fps):
+    """The `speed:` block players_still hands to velocity.player_speed."""
+    if not isinstance(block, dict) or not block:
+        raise ValueError(f"deadball method players_still needs a 'speed' block with "
+                         f"{', '.join(SPEED_KEYS)}")
+    if fps is None:
+        missing = [key for key in SPEED_KEYS if key not in block]
+        if missing:
+            raise ValueError(f"deadball.speed: missing {missing}")
+        return
+    try:
+        velocity.player_speed_settings(block, fps)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"deadball.speed: {error}") from error
 
 
 def _number(section, key, name, needed_by=None):

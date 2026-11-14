@@ -32,16 +32,21 @@ mostly empty and its unit is still being checked (the same doubt as for the ball
                                   cfg["deadball"]["speed"])      # float[n, n_slots]
 
 Its settings are the three keys above plus one more, checked by player_speed_settings():
-    max_speed       m/s. A speed above this is dropped (NaN). The 46 slots are tracklets: when
-                    another player takes over a slot the position jumps, and a line fit across
-                    the jump gives a huge speed for a few frames. One such slot would lift the
-                    average speed of all players, so it is dropped. Set it above the fastest
-                    sprint (about 12 m/s).
-Nothing calls player_speed yet: deadball.players_still still reads match.players_speed until
-its owner switches over.
+    max_speed       m/s, set above the fastest sprint (about 12 m/s). The 46 slots are
+                    tracklets: when another player takes over a slot, its position jumps. Used
+                    twice:
+                    1. Jumps break the track. Where a slot moves further between two seen
+                       positions than max_speed allows (max_speed / fps metres per frame), the
+                       track is cut there and each piece is fitted on its own. Without the cut, a
+                       line fit across a jump of a few metres reads as a sprint for several
+                       frames, still under max_speed, so the cap alone would not catch it.
+                    2. Any speed still above it is dropped (NaN), as a last guard.
+deadball.players_still uses it, with the `speed:` block of the `deadball:` section.
 
 No data is read here. The tests use made-up tracks.
 """
+
+import itertools
 
 import numpy as np
 
@@ -176,9 +181,11 @@ def player_speed(xy, period, fps, section):
     player_speed_settings. Returns float[n, n_slots].
 
     Each slot is fitted on its own with the same line fit as the ball (ball_velocity), and each
-    half is handled on its own. A value is NaN where the slot is empty on that frame, where the
-    window has too few seen positions, outside the graded halves, and where the speed is above
-    max_speed (a tracklet that jumped, not a player who ran).
+    half is handled on its own. Where the slot jumps further than max_speed allows, its track is
+    cut and each piece is fitted on its own (see _pieces). A value is NaN where the slot is empty
+    on that frame, where the window has too few seen positions (also next to a cut: the window
+    then only sees one side), outside the graded halves, and where the speed is still above
+    max_speed.
     """
     settings = player_speed_settings(section, fps)
     cap = settings.pop("max_speed")
@@ -192,6 +199,25 @@ def player_speed(xy, period, fps, section):
             track = xy[part, slot]
             if np.isnan(track).all():                    # slot never used in this half
                 continue
-            slopes = _slopes(track, **settings) * fps    # per frame -> per second
+            slopes = np.full_like(track, np.nan)
+            for first, stop in _pieces(track, cap / fps):
+                slopes[first:stop] = _slopes(track[first:stop], **settings) * fps  # m/s
             speed[part, slot] = np.hypot(slopes[:, 0], slopes[:, 1])
     return np.where(speed > cap, np.nan, speed)
+
+
+def _pieces(track, max_step):
+    """Cut one slot's track where it jumps. Returns (first, stop) frame ranges covering it.
+
+    A jump: two seen positions further apart than max_step metres per frame between them (a
+    missing frame in between allows one more step). The new piece starts at the frame after
+    the jump. A piece shorter than the fit window simply gets no speed.
+    """
+    seen = np.flatnonzero(~np.isnan(track).any(axis=1))
+    if seen.size < 2:
+        return [(0, len(track))]
+    step = np.hypot(*np.diff(track[seen], axis=0).T)        # metres between seen positions
+    allowed = max_step * np.diff(seen)                      # metres possible in that time
+    cuts = seen[1:][step > allowed]
+    edges = [0, *cuts.tolist(), len(track)]
+    return list(itertools.pairwise(edges))
