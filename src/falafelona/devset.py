@@ -22,7 +22,9 @@ Assumptions that differ from the competition match, so the dev score is a COMPAR
 not a prediction of the real score:
 - The truth is the data provider's own possession flag (DFL), not the challenge provider's.
   Both are mechanical from tracking, but their rules for "dead" and "owning" may differ a bit.
-- Gaps are placed at random. Real gaps are not random (they happen when the ball is hidden).
+- Gaps are placed at random, or (placement: stoppage) starting 0-1 s before a dead-ball
+  spell. Real gaps are neither: they happen whenever the ball is hidden. The two kinds
+  bracket them, so every comparison is run under both.
 - Players come straight from tracking: no tracklet swaps, no empty slots at random.
 
 Rules this module follows (CLAUDE.md):
