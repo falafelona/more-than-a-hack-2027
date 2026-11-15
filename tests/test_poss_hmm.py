@@ -376,12 +376,14 @@ def test_bad_costs_are_refused(value):
 
 @pytest.mark.parametrize("name", ["poss-hmm.yaml", "poss-hmm-margin.yaml",
                                   "poss-switch-cost.yaml"])
-def test_the_experiment_configs_differ_from_final_only_in_possession(name):
+def test_the_experiment_configs_differ_from_the_old_final_only_in_possession(name):
+    """They were made from the old final.yaml (baseline + interpolate), which is
+    configs/exp/ball-interpolate.yaml: the dev-set rows compare against it."""
     exp = load_config(f"configs/exp/{name}")
-    final = load_config("configs/final.yaml")
+    old_final = load_config("configs/exp/ball-interpolate.yaml")
     assert exp["possession"]["method"] in possession.METHODS
     assert {k: v for k, v in exp.items() if k != "possession"} == {
-        k: v for k, v in final.items() if k != "possession"
+        k: v for k, v in old_final.items() if k != "possession"
     }
 
 

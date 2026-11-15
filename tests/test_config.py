@@ -8,10 +8,15 @@ from falafelona.config import ConfigError, load_config
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
 
-@pytest.mark.parametrize("name", ["baseline.yaml", "final.yaml"])
-def test_shipped_configs_load(name):
-    cfg = load_config(CONFIGS / name)
-    assert cfg["possession"]["method"] == "nearest_majority"
+def test_shipped_configs_load():
+    assert load_config(CONFIGS / "baseline.yaml")["possession"]["method"] == "nearest_majority"
+    assert load_config(CONFIGS / "final.yaml")["possession"]["method"] == "hmm"
+
+
+def test_final_is_the_best_dev_set_config():
+    """final.yaml carries the same settings as configs/exp/poss-best-dead-gap.yaml (#45)."""
+    assert load_config(CONFIGS / "final.yaml") == load_config(
+        CONFIGS / "exp" / "poss-best-dead-gap.yaml")
 
 
 def test_baseline_matches_official_smooth50():
