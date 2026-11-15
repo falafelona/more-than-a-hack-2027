@@ -6,6 +6,11 @@
 #   make lint        ruff on our code (vendor/ excluded)
 #   make submission  build outputs/Falafelona.csv from configs/final.yaml
 #   make validate    run the official validate_submission.py on outputs/Falafelona.csv
+#   make evaluate    build one CSV per config into outputs/eval/, validate each, and score them
+#                    all with the official run_evaluation.py on the PUBLIC 5 minutes (+ bootstrap).
+#                    Default: baseline vs final. Another set:
+#                    make evaluate EVAL_CONFIGS="configs/baseline.yaml configs/exp/x.yaml"
+#                    A pipeline check only: never pick a version on it (D9).
 #   make check       lint and test: run before every PR
 #   make devset      compare configs on the IDSSE dev set (experiments/README.md). The first
 #                    config is the reference. Default: baseline vs final. Another pair:
@@ -13,7 +18,7 @@
 #                    make devset GAPS=stoppage   gaps over dead-ball spells instead of at random
 #                    make devset TAGS=1   simulated restart tags, to judge the tag clues
 #
-# `submission`, `validate` and `devset` read real data or real outputs: humans run them, not AI agents.
+# `submission`, `validate`, `evaluate` and `devset` read real data or real outputs: humans run them, not AI agents.
 
 PYTHON  ?= python3.12
 VENV    := .venv
@@ -21,8 +26,11 @@ PY      := $(VENV)/bin/python
 CONFIG  ?= configs/final.yaml
 OUT     ?= outputs/Falafelona.csv
 CONFIGS ?= configs/baseline.yaml configs/final.yaml
+EVAL_CONFIGS ?= configs/baseline.yaml configs/final.yaml
+EVAL_DIR := outputs/eval
+BOOTSTRAP ?= 1000
 
-.PHONY: setup test lint check submission validate devset clean
+.PHONY: setup test lint check submission validate evaluate devset clean
 
 setup:
 	@$(PYTHON) -c 'import sys; assert sys.version_info[:2] == (3, 12), "need Python 3.12, got " + sys.version.split()[0]' \
@@ -52,6 +60,19 @@ submission:
 
 validate:
 	$(PY) vendor/challenge/evaluation/validate_submission.py $(OUT)
+
+evaluate:
+	@test -n "$$MTAH_DATA_DIR" || { echo "MTAH_DATA_DIR is not set (CONTRIBUTING.md)"; exit 1; }
+	mkdir -p $(EVAL_DIR)
+	rm -f $(EVAL_DIR)/*.csv
+	@for c in $(EVAL_CONFIGS); do \
+		name=$$(basename $$c .yaml); \
+		echo "== $$name"; \
+		$(PY) -m falafelona run --config $$c --out $(EVAL_DIR)/$$name.csv || exit 1; \
+		$(PY) vendor/challenge/evaluation/validate_submission.py $(EVAL_DIR)/$$name.csv || exit 1; \
+	done
+	$(PY) vendor/challenge/evaluation/run_evaluation.py --gt public --results $(EVAL_DIR) \
+		--out $(EVAL_DIR) --bootstrap $(BOOTSTRAP)
 
 devset:
 	@test -n "$$IDSSE_DATA_DIR" || { echo "IDSSE_DATA_DIR is not set (experiments/README.md)"; exit 1; }
