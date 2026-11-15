@@ -45,8 +45,17 @@ Every setting is chosen on other matches (the IDSSE dev set, section 3), never o
 wins by more than 0.04 spellF1 under both kinds of simulated ball gaps, or wins on at least 6 of
 7 matches under both, on two seeds. Below 0.04 differences are noise.
 
-**Final configuration.** [to fill after the freeze: which ball, dead-ball and possession methods
-are in `configs/final.yaml`, and the fallback rule if nothing passed: baseline + interpolate.]
+**Final configuration** (`configs/final.yaml`):
+
+- **Ball:** `interpolate`, filling gaps up to 0.5 s with a straight line.
+- **Dead ball:** one combined chance per frame. The clues are: before the second-half kickoff;
+  ball past a line; before a tagged restart; a graded chance inside each ball gap (from its
+  length, the ball last seen or reappearing near a line or the centre spot, and players standing
+  still); and a seen ball standing still at a restart spot.
+- **Possession:** the 3-state H / A / D decoder, with team evidence from the distance margin
+  between the nearest home and away players, moved 0.5 s later (the receiver reaches the ball
+  just before touching it), no evidence while the ball moves faster than 12 m/s (a pass or a
+  shot), and a small push towards the team near the ball when play restarts.
 
 ### 1.1 Ball track
 Owner: Abdallah (task 2.7). [to fill]
@@ -111,19 +120,18 @@ data in elite soccer." *Scientific Data* 12, 195 (2025). https://doi.org/10.1038
 
 ## 4. Possession rules
 
-How our labels follow the official definitions (CHALLENGE.md). [Dudu to confirm against the final
-decoder and settings.]
+How our labels follow the official definitions (CHALLENGE.md), as set in `configs/final.yaml`.
 
 | Situation | Official rule | What we implemented |
 |---|---|---|
 | States | Every graded frame is `H`, `A` or `D` | The decoder has exactly these three states |
 | Loose or contested ball | Possession stays with the last team that had it | When no player is near the ball there is no team evidence, so the decoder keeps the current state |
 | A touch, a deflection, a pass flying past | Not a change of possession | A change has a cost, so a few frames of evidence for the other team cannot pay for it |
-| Controlled possession by the other team | A change of possession | Sustained evidence (the other team clearly closer to the ball over several frames) pays the switch cost |
-| Aerial duel | Not a change without control | Our tracking has no ball height, so we cannot see the ball in the air. A fast ball (ball velocity per frame) counts as a pass, not as control [Dudu: fast-ball rule, final?] |
-| Restart after a stoppage | There is a clear possessor | Play resumes from `D` to the team the evidence supports after the restart |
+| Controlled possession by the other team | A change of possession | Sustained evidence (the other team clearly closer to the ball over several frames) pays the switch cost. Evidence is moved 0.5 s later, because the receiver nears the ball just before the touch |
+| Aerial duel, a ball flying past | Not a change without control | Our tracking has no ball height. While the ball moves faster than 12 m/s (a pass, a shot, a long ball), no player gets team evidence, so the ball must slow down near a player before possession can change |
+| Restart after a stoppage | There is a clear possessor | When a dead spell of at least 3 s ends, the team nearest the ball around that moment takes the restart (the other team pays an extra cost for 2 s) |
 | Dead ball | Always `D`, never a possession | The dead-ball score pulls the decoder towards `D`; second-half frames before its kickoff are `D`, found from the Kick Off (Start) tag, never a fixed frame (added to the final configuration at the freeze) |
-| Abstaining (`X`) | `X` on a graded frame is a miss | We write no `X` [D14, to confirm] |
+| Abstaining (`X`) | `X` on a graded frame is a miss | We write no `X` (D14) |
 
 ## 5. Results
 
@@ -157,17 +165,32 @@ seed 0, and on how many of the 7 matches it was better). Full rows, including se
 | Possession: HMM, nearest team | −0.012 (1/7) | +0.008 (5/7) | dropped: noise |
 | Possession: HMM, distance margin | −0.006 (1/7) | +0.038 (7/7) | dropped alone: no gain under random gaps |
 | HMM margin + flat dead score | +0.006 (4/7) | +0.045 (7/7) | dropped: no gain under random gaps |
-| HMM margin + graded gap score | +0.022 (7/7) | +0.047 (7/7) | best candidate so far, not in: the random-gap gain is below 0.04, and 5/7 on seed 1 |
+| HMM margin + graded gap score | +0.022 (7/7) | +0.047 (7/7) | not in alone: the random-gap gain is below 0.04, and 5/7 on seed 1 |
+| + evidence lag 0.5 s, fast-ball rule, switch cost 3.5 | +0.059 (7/7) | +0.098 (7/7) | **kept**: passes the Go/No-Go on both seeds |
+| + still ball at a restart spot, restart-taker evidence (against the row above) | +0.080 (7/7) | +0.042 (7/7) | **kept**: passes on both seeds. This is `final.yaml` |
+| Velocity matching | +0.000 | — | dropped: no effect |
 
-[to fill after the freeze: final retuned results, the submitted version against the baseline,
-and the same match statistics as above for the submitted file.]
+**The submitted version.** On the dev set (seed 0) it scores 0.351 / 0.410 spellF1 (random /
+stoppage gaps), against 0.212 / 0.269 for the baseline configuration, and is better on all 7
+matches under both, on both seeds. With simulated restart tags it scores 0.344.
+
+| On our match | Baseline | Submitted |
+|---|---|---|
+| Possessions | 669 | 542 |
+| Mean possession length | 7.6 s | 8.1 s |
+| Share of dead-ball frames | 35.9% | 45.2% |
+| Public 5-minute check, spellF1 / macroF1 | 0.326 / 0.621 | 0.410 / 0.681 |
+
+The public check only shows the pipeline works: 17 possessions are too few to compare versions
+(D9). The dev-set gain will likely be smaller on our match: the still-ball clue fires far less
+there (about 930 frames turn `D`).
 
 ## 6. Limitations
 
 - **The dev-set truth is not the organisers' labelling.** It is the data provider's own
   possession flag, which may draw the line on loose balls and restarts differently.
-- **IDSSE has no Smart Tagging,** so any clue built on restart tags cannot be tested on the dev
-  set as it is.
+- **IDSSE has no Smart Tagging.** Restart-tag clues were tested on simulated tags made from the
+  dev-set truth, which are cleaner than Metrica's automatic ones.
 - **IDSSE tracking is cleaner than ours.** It follows 22 identified players with no swaps; ours
   averages 20.5 tracked objects, with no identities and frequent tracklet swaps.
 - **Simulated gaps only bracket our real gaps.** Random and stoppage cuts are the two extremes;
@@ -180,10 +203,12 @@ and the same match statistics as above for the submitted file.]
   in the match), and every throw-in has no team.
 - [ball, dead ball, possession: one line each from their owners]
 
-**With more time** we would: test the restart-tag clues on a dev set with simulated tags;
-simulate tracklet swaps and missing players on the dev set; and retune the decoder so the
-number and length of possessions match the truth (ours are still too few and too long on the
-dev set).
+- **Still too few possessions.** On the dev set we find 240–300 per match against 370–511 in the
+  truth, so some real changes of possession are missed.
+
+**With more time** we would: simulate tracklet swaps and missing players on the dev set; make the
+simulated tags as noisy as the real ones; and retune the decoder so the number and length of
+possessions match the truth.
 
 ## 7. Reproduction
 Owner: Tala. [to fill: one command, SHA-256 of the file, runtime and machine]
