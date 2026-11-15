@@ -203,8 +203,14 @@ there (about 930 frames turn `D`).
   in the match), and every throw-in has no team.
 - [ball, dead ball, possession: one line each from their owners]
 
-- **Still too few possessions.** On the dev set we find 240–300 per match against 370–511 in the
-  truth, so some real changes of possession are missed.
+- **The possession count does not transfer.** On the dev set we find 240–300 possessions per
+  match against 370–511 in the truth, yet on our match we already find 542, more than any dev
+  match's true count. So we never tuned towards a count target: pushing it higher could
+  over-split our match.
+- **Some clues may gain less on our match.** The still-ball clue relies on the ball staying
+  visible during a stoppage. On IDSSE it does; on our match the ball mostly disappears, so the
+  clue changes only about 930 frames. The restart windows (8–45 s before a tag) and the 0.5 s
+  evidence delay were tuned to IDSSE's timing and tags, not to Metrica's.
 
 **With more time** we would: simulate tracklet swaps and missing players on the dev set; make the
 simulated tags as noisy as the real ones; and retune the decoder so the number and length of
