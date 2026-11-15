@@ -25,15 +25,23 @@ import numpy as np
 from falafelona import velocity
 from falafelona.io import select_tags
 
-METHODS = ("ball_missing", "out_of_bounds", "players_still", "gap_chance", "before_kickoff",
-           "before_restart", "combined")
+METHODS = ("ball_missing", "out_of_bounds", "players_still", "still_ball", "still_ball_at_spot",
+           "still_ball_before_restart", "gap_chance", "before_kickoff", "before_restart",
+           "combined")
 # The Smart Tagging Type values that are restarts (DATA.md). Kick Off (Start) has its own method.
 RESTART_TYPES = ("throw-in", "corner kick", "goal kick", "free kick", "kick off (after goal)")
 # The settings each method reads from the config.
 SETTINGS = {
     "out_of_bounds": ("out_margin",),
     "players_still": ("still_speed", "still_seconds"),
+    "still_ball": ("still_ball_speed", "still_ball_seconds"),
+    "still_ball_at_spot": ("still_ball_speed", "still_ball_seconds", "spot_line_m",
+                           "spot_centre_m", "goal_area_depth_m", "goal_area_half_width_m"),
+    "still_ball_before_restart": ("still_ball_speed", "still_ball_seconds"),
 }
+# The clues that read the ball's speed from its positions (the `ball_speed:` block).
+STILL_BALL_CLUES = ("still_ball", "still_ball_at_spot", "still_ball_before_restart")
+
 # players_still also needs the player speed block `speed:` (velocity.player_speed_settings).
 SPEED_KEYS = (*velocity.SETTING_KEYS, "max_speed")
 # gap_chance reads the `gap:` block: these settings, and one weight per clue in `weights:`.
@@ -63,6 +71,12 @@ class DeadBall:
             return self.ball_missing()
         elif method == "players_still":
             return self.players_still()
+        elif method == "still_ball":
+            return self.still_ball()
+        elif method == "still_ball_at_spot":
+            return self.still_ball_at_spot()
+        elif method == "still_ball_before_restart":
+            return self.still_ball_before_restart()
         elif method == "gap_chance":
             return self.gap_chance()
         elif method == "before_kickoff":
@@ -116,6 +130,36 @@ class DeadBall:
         still = keep_long_stretches(still, min_frames) # a short slow moment is not a stoppage
         still = still.astype(float)
         return still
+
+    def still_ball(self):
+        """1.0 where the SEEN ball moves slower than still_ball_speed for still_ball_seconds.
+
+        A visible dead ball (free kick being set up, keeper holding it, throw-in about to be
+        taken): every other clue needs the ball missing, out of bounds or a tag. Speed from the
+        ball's positions (velocity.ball_velocity, the `ball_speed:` block). A missing ball has
+        no speed and never counts as still: gap_chance handles gaps.
+        """
+        min_frames = round(self.cfg["still_ball_seconds"] * self.data.fps)
+        _, speed = velocity.ball_velocity(self.data.ball_xy, self.data.period, self.data.fps,
+                                          self.cfg["ball_speed"])
+        still = np.isfinite(speed) & (speed < self.cfg["still_ball_speed"])
+        still = keep_long_stretches(still, min_frames)
+        return still.astype(float)
+
+    def still_ball_at_spot(self):
+        """still_ball, but only where the ball lies at a restart spot: within spot_line_m of a
+        touchline or goal line (throw-in, corner), in the goal area (goal kick), or within
+        spot_centre_m of the centre spot (kickoff). A still ball there is almost always a
+        restart being prepared; a still ball in open play (a player shielding it) is not.
+        """
+        at_spot = restart_spot(self.data.ball_xy, self.data.pitch, self.cfg)
+        return self.still_ball() * at_spot
+
+    def still_ball_before_restart(self):
+        """still_ball, but only in the seconds before a Smart Tagging restart (the windows of
+        before_restart). 0 everywhere when the match has no tags (the dev set without --tags).
+        """
+        return self.still_ball() * self.before_restart()
 
     def _players_slow(self):
         """True on frames where the players' median speed is below still_speed (any length)."""
@@ -226,10 +270,13 @@ def check_config(section, fps=None):
     if "players_still" in used:
         _check_speed_block(section.get("speed"), fps)
 
+    if any(clue in used for clue in STILL_BALL_CLUES):
+        _check_ball_speed_block(section.get("ball_speed"), fps)
+
     if "gap_chance" in used:
         _check_gap_block(section, fps)
 
-    if "before_restart" in used:
+    if "before_restart" in used or "still_ball_before_restart" in used:
         restarts = section.get("restart_seconds")
         if not isinstance(restarts, dict) or not restarts:
             raise ValueError("deadball method before_restart needs 'restart_seconds': "
@@ -255,6 +302,21 @@ def _check_speed_block(block, fps):
         velocity.player_speed_settings(block, fps)
     except (TypeError, ValueError) as error:
         raise ValueError(f"deadball.speed: {error}") from error
+
+def _check_ball_speed_block(block, fps):
+    """The `ball_speed:` block still_ball hands to velocity.ball_velocity."""
+    if not isinstance(block, dict) or not block:
+        raise ValueError(f"deadball method still_ball needs a 'ball_speed' block with "
+                         f"{', '.join(velocity.SETTING_KEYS)}")
+    if fps is None:
+        missing = [key for key in velocity.SETTING_KEYS if key not in block]
+        if missing:
+            raise ValueError(f"deadball.ball_speed: missing {missing}")
+        return
+    try:
+        velocity.velocity_settings(block, fps)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"deadball.ball_speed: {error}") from error
 
 
 def _check_gap_block(section, fps):
@@ -300,6 +362,23 @@ def _near_line(point, pitch, distance):
     length, width = pitch
     x, y = point
     return min(x, length - x, y, width - y) <= distance
+
+def restart_spot(xy, pitch, section):
+    """float[n]: 1.0 where the ball lies at a restart spot, else 0.0 (also where it is missing).
+
+    Near a line: within spot_line_m of a touchline or goal line, or past one (throw-in,
+    corner). Goal area: within goal_area_depth_m of a goal line and goal_area_half_width_m of
+    the middle (goal kick). Centre: within spot_centre_m of the centre spot (kickoff).
+    """
+    length, width = pitch
+    x, y = xy[:, 0], xy[:, 1]
+    with np.errstate(invalid="ignore"):
+        to_line = np.minimum(np.minimum(x, length - x), np.minimum(y, width - y))
+        near_line = to_line <= section["spot_line_m"]
+        goal_area = ((np.minimum(x, length - x) <= section["goal_area_depth_m"])
+                     & (np.abs(y - width / 2) <= section["goal_area_half_width_m"]))
+        centre = np.hypot(x - length / 2, y - width / 2) <= section["spot_centre_m"]
+    return (near_line | goal_area | centre).astype(float)
 
 
 def _near_centre(point, pitch, distance):

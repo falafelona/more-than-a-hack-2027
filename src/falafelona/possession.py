@@ -350,6 +350,58 @@ def lag_team_costs(team_costs: np.ndarray, lag: int) -> np.ndarray:
         shifted[lag:] = team_costs[:-lag]
     return shifted
 
+def restart_team_costs(codes: np.ndarray, dead_score: np.ndarray, threshold: float,
+                       min_dead: int, look: int, boost: int, cost: float) -> np.ndarray:
+    """float[n, 2]: extra H and A costs for the team that takes each restart.
+
+    A dead spell is a run of at least min_dead frames with dead_score >= threshold. Where it
+    ends, the team nearest the ball most often in the `look` frames on either side of the end
+    (codes: HOME / AWAY / NOBODY per frame) is taking the restart. For the `boost` frames
+    after the end, the other team's state costs `cost` per frame. A tie gives no evidence.
+    """
+    codes = np.asarray(codes)
+    n = len(codes)
+    costs = np.zeros((n, 2))
+    dead = np.clip(np.nan_to_num(np.asarray(dead_score, dtype=np.float64)), 0, 1) >= threshold
+    padded = np.concatenate(([False], dead, [False]))
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    for first, stop in zip(edges[0::2], edges[1::2], strict=True):
+        if stop - first < min_dead or stop >= n:
+            continue
+        window = codes[max(first, stop - look):min(n, stop + look)]
+        home = int(np.sum(window == Possession.HOME))
+        away = int(np.sum(window == Possession.AWAY))
+        if home == away:
+            continue
+        other = A_STATE if home > away else H_STATE
+        costs[stop:stop + boost, other] += cost
+    return costs
+
+
+RESTART_KEYS = ("threshold", "min_dead_s", "look_s", "boost_s", "cost")
+
+
+def _restart(match, dead_score, section):
+    """float[n, 2] restart costs, or None when possession.restart is not set (off)."""
+    if "restart" not in section:
+        return None
+    block = section["restart"]
+    if not isinstance(block, dict):
+        raise TypeError("possession.restart must be a mapping (" + ", ".join(RESTART_KEYS) + ")")
+    values = {}
+    for key in RESTART_KEYS:
+        value = block.get(key)
+        if (isinstance(value, bool) or not isinstance(value, int | float)
+                or not np.isfinite(value) or value <= 0):
+            raise ValueError(f"possession.restart.{key} must be a number > 0, got {value!r}")
+        values[key] = float(value)
+    fps = match.fps
+    codes, _ = Possession(match).nearest_player_labels()
+    return restart_team_costs(codes, dead_score, values["threshold"],
+                              max(1, round(values["min_dead_s"] * fps)),
+                              max(1, round(values["look_s"] * fps)),
+                              max(1, round(values["boost_s"] * fps)), values["cost"])
+
 
 def add_dead_costs(team_costs: np.ndarray, dead_score: np.ndarray,
                    dead_weight: float) -> np.ndarray:
@@ -440,6 +492,9 @@ def _hmm(match, dead_score, section):
 
     lag = _number(section, "evidence_lag", whole=True) if "evidence_lag" in section else 0
     team = lag_team_costs(team, lag)
+    restart = _restart(match, dead_score, section)
+    if restart is not None:
+        team = team + restart
     costs = add_dead_costs(team, dead_score, dead_weight)
     return np.array(STATES)[viterbi(costs, table)]
 
