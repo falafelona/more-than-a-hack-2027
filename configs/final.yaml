@@ -1,10 +1,11 @@
 # The configuration we submit. Organisers' deadline: Tue 17 Nov 23:59 CET. The team locks it on
 # Sun 15 or Mon 16 Nov (tag v1.0-freeze).
 # Changes only via a PR with a row in experiments/RESULTS.md.
-# Now: a copy of configs/exp/poss-best-dead-gap.yaml (#45): graded dead score (gap_chance and the
-# restart tags) and the H / A / D HMM with the evidence lag and the fast-ball rule. Dev set vs the
-# old final.yaml (= baseline + interpolate), better on 7/7 matches: seed 0 +0.059 / +0.098
-# (random / stoppage cuts), +0.071 / +0.105 with tags; seed 1 +0.057 / +0.094.
+# Now: a copy of configs/exp/best-still-ball-restart.yaml: the #45 config (graded dead score with
+# gap_chance and the restart tags, H / A / D HMM with the evidence lag and the fast-ball rule) plus
+# the still-ball clue in the dead score and the restart-taker evidence. Dev set vs the #45 config,
+# better on 7/7 matches in every run: seed 0 +0.080 / +0.042 (random / stoppage cuts), +0.060 with
+# tags; seed 1 +0.080 / +0.044.
 seed: 0
 
 ball:
@@ -20,6 +21,7 @@ deadball:
     out_of_bounds: 1.0    # strongest clue: enough on its own
     before_restart: 0.6   # enough on its own: before a tagged restart the ball is dead, even if players move
     gap_chance: 1.0       # already a chance (0-1) inside each ball gap, 0 where the ball is seen
+    still_ball_at_spot: 0.6   # NEW: a seen ball standing still at a restart spot (free kick, throw-in, goal kick set up)
   out_margin: 1.0         # metres past the line before we call it out
   still_speed: 1.0        # m/s: players' median speed below this counts as standing (gap clue players_still)
   speed:                  # player speed from positions (velocity.player_speed); the ATD speed field is not used
@@ -27,6 +29,16 @@ deadball:
     min_points: 5         # seen positions needed in that window
     min_each_side: 2      # seen positions needed before AND after the frame
     max_speed: 12.0       # m/s, above any sprint: a bigger jump is a tracklet swap, so the track is cut there
+  still_ball_speed: 0.5   # NEW: m/s, a seen ball slower than this counts as standing still
+  still_ball_seconds: 2.0 # NEW: s it must stand still in a row (a short stop in open play does not count)
+  spot_line_m: 2.0        # NEW: m from a touchline or goal line (throw-in, corner); same as gap.line_distance
+  spot_centre_m: 3.0      # NEW: m from the centre spot (kickoff); same as gap.spot_distance
+  goal_area_depth_m: 5.5  # NEW: goal area (goal kick), laws of the game
+  goal_area_half_width_m: 9.16
+  ball_speed:             # NEW: ball speed from positions for the still-ball clue (velocity.ball_velocity)
+    half_window_s: 0.2    # s on each side of the frame: wider than for fast balls, so jitter averages out
+    min_points: 5
+    min_each_side: 2
   gap:                    # gap_chance: log-odds added up per gap, then turned into a chance (0-1)
     intercept: -1.0       # a 1 s gap with no clue: chance 0.27
     length_weight: 0.25   # added per doubling of the gap's length: 8 s alone gives 0.44, 32 s gives 0.56
@@ -58,6 +70,12 @@ possession:
   from_dead_cost: 6.0     # cost of leaving D for H or A
   evidence_lag: 12        # frames (0.5 s): H / A evidence moved later; the receiver nears the ball before touching it
   fast_ball_speed: 12     # m/s: no H / A evidence while the ball moves faster (pass or shot)
+  restart:                # NEW: the team near the ball where a dead spell ends takes the restart
+    threshold: 0.5        # dead score at or above this is dead
+    min_dead_s: 3.0       # s: only real stoppages, not a short dip in the dead score
+    look_s: 2.0           # s on each side of the end: who is nearest the ball most often
+    boost_s: 2.0          # s after the end where the other team pays the extra cost
+    cost: 0.5             # per frame, about one frame of full margin evidence (team_cost 0.5)
   velocity:               # ball speed for fast_ball_speed (velocity.ball_velocity)
     half_window_s: 0.12   # s on each side of the frame for the line fit
     min_points: 4         # seen positions needed in that window

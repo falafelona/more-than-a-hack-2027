@@ -14,9 +14,9 @@ def test_shipped_configs_load():
 
 
 def test_final_is_the_best_dev_set_config():
-    """final.yaml carries the same settings as configs/exp/poss-best-dead-gap.yaml (#45)."""
+    """final.yaml carries the same settings as configs/exp/best-still-ball-restart.yaml."""
     assert load_config(CONFIGS / "final.yaml") == load_config(
-        CONFIGS / "exp" / "poss-best-dead-gap.yaml")
+        CONFIGS / "exp" / "best-still-ball-restart.yaml")
 
 
 def test_baseline_matches_official_smooth50():
