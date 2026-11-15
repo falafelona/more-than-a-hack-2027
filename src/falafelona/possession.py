@@ -403,6 +403,79 @@ def _restart(match, dead_score, section):
                               max(1, round(values["boost_s"] * fps)), values["cost"])
 
 
+def gap_reappear_team_costs(codes: np.ndarray, ball_seen: np.ndarray, dead_score: np.ndarray,
+                            period: np.ndarray, min_gap: int, live_max: float, look: int,
+                            boost: int, cost: float) -> np.ndarray:
+    """float[n, 2]: extra H and A costs where the ball reappears after a long LIVE gap.
+
+    During a long ball gap the decoder keeps the last team, but in live play possession may have
+    changed hands unseen. So where the ball reappears (the first seen frame after a gap of at
+    least min_gap frames inside a graded half), the team nearest the ball most often in the next
+    `look` frames (codes: HOME / AWAY / NOBODY per frame) is favoured: for the `boost` frames
+    from that point, the other team's state costs `cost` per frame. Brief evidence after a gap
+    (too little on its own to pay the switch cost) can then still give the switch, so a
+    possession won during the gap is not missed. Where in the gap the switch lands is left to
+    the decoder: the gap itself holds no evidence either way.
+
+    Only gaps that were live play count: the mean dead score over the gap must be below
+    live_max. A gap that was a stoppage is left to the restart rule. A tie gives no evidence.
+    """
+    codes = np.asarray(codes)
+    n = len(codes)
+    costs = np.zeros((n, 2))
+    p = np.clip(np.nan_to_num(np.asarray(dead_score, dtype=np.float64)), 0.0, 1.0)
+    missing = ~np.asarray(ball_seen, dtype=bool) & (np.asarray(period) > 0)
+    padded = np.concatenate(([False], missing, [False]))
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    for first, stop in zip(edges[0::2], edges[1::2], strict=True):
+        if stop - first < min_gap or stop >= n or period[stop] != period[first]:
+            continue                              # too short, at the end, or across halves
+        if p[first:stop].mean() >= live_max:
+            continue                              # a stoppage, not live play
+        window = codes[stop:min(n, stop + look)]
+        home = int(np.sum(window == Possession.HOME))
+        away = int(np.sum(window == Possession.AWAY))
+        if home == away:
+            continue
+        other = A_STATE if home > away else H_STATE
+        costs[stop:stop + boost, other] += cost
+    return costs
+
+
+GAP_REAPPEAR_KEYS = ("min_gap_s", "live_max", "look_s", "boost_s", "cost")
+
+
+def _gap_reappear(match, dead_score, section):
+    """float[n, 2] gap-reappear costs, or None when possession.gap_reappear is not set (off)."""
+    if "gap_reappear" not in section:
+        return None
+    block = section["gap_reappear"]
+    if not isinstance(block, dict):
+        raise TypeError("possession.gap_reappear must be a mapping ("
+                        + ", ".join(GAP_REAPPEAR_KEYS) + ")")
+    unknown = sorted(set(block) - set(GAP_REAPPEAR_KEYS))
+    if unknown:
+        raise ValueError(f"possession.gap_reappear: unknown keys {unknown}")
+    values = {}
+    for key in GAP_REAPPEAR_KEYS:
+        value = block.get(key)
+        if (isinstance(value, bool) or not isinstance(value, int | float)
+                or not np.isfinite(value) or value <= 0):
+            raise ValueError(f"possession.gap_reappear.{key} must be a number > 0, got {value!r}")
+        values[key] = float(value)
+    if values["live_max"] > 1:
+        raise ValueError("possession.gap_reappear.live_max is a dead chance, so at most 1, "
+                         f"got {values['live_max']!r}")
+    fps = match.fps
+    codes, _ = Possession(match).nearest_player_labels()
+    seen = ~np.isnan(np.asarray(match.ball_xy)).any(axis=1)
+    return gap_reappear_team_costs(codes, seen, dead_score, match.period,
+                                   max(1, round(values["min_gap_s"] * fps)),
+                                   values["live_max"],
+                                   max(1, round(values["look_s"] * fps)),
+                                   max(1, round(values["boost_s"] * fps)), values["cost"])
+
+
 def add_dead_costs(team_costs: np.ndarray, dead_score: np.ndarray,
                    dead_weight: float) -> np.ndarray:
     """float[n, 3]: the H and A costs plus the D column from dead_score p in 0..1.
@@ -462,6 +535,10 @@ def _hmm(match, dead_score, section):
         Needs a `velocity:` block for velocity.ball_velocity.
     velocity_match: {max_diff, control_distance, cost}; extra evidence for the team whose
         nearest player moves with the ball (default: not set = off). Needs `velocity:` too.
+    restart: {threshold, min_dead_s, look_s, boost_s, cost}; the team near the ball where a
+        dead spell ends takes the restart (default: not set = off).
+    gap_reappear: {min_gap_s, live_max, look_s, boost_s, cost}; where the ball reappears after
+        a long gap of live play, favour the team near it (default: not set = off).
     """
     evidence = section.get("team_evidence", "nearest")
     if evidence not in TEAM_EVIDENCE:
@@ -495,6 +572,9 @@ def _hmm(match, dead_score, section):
     restart = _restart(match, dead_score, section)
     if restart is not None:
         team = team + restart
+    reappear = _gap_reappear(match, dead_score, section)
+    if reappear is not None:
+        team = team + reappear
     costs = add_dead_costs(team, dead_score, dead_weight)
     return np.array(STATES)[viterbi(costs, table)]
 
