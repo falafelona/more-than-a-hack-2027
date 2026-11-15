@@ -72,6 +72,6 @@ We have no ground truth for our own match, so versions are compared on other mat
 
 ## X and the second half
 
-The `X` policy is not agreed yet. D14 proposes that `pipeline.py` writes `X` only on ungraded frames, using the official `games.half_video_blocks`.
+No `X` is written (D14): `x_policy: none`. Ungraded frames are never scored, and on graded frames `X` cannot gain on spellF1 and always misses on macroF1.
 
 The second half is graded from frame 110,808, before its kickoff, and those frames are dead ball. Detect the kickoff from the `Kick Off (Start)` Smart Tag rather than hard-coding a frame.
