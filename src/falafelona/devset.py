@@ -47,6 +47,7 @@ human can check these names against the real files in one minute.
 """
 
 import hashlib
+import itertools
 import json
 import os
 import xml.etree.ElementTree as ET
@@ -86,6 +87,14 @@ HEADLINE_IOU = pm.SPELL_IOU_HEADLINE                # possession precision/recal
 PLACEMENTS = ("random", "stoppage")
 # Besides spellF1, these get a paired difference in the report: they say WHY spellF1 moved.
 PAIRED_EXTRA = ("spell_precision", "spell_recall", "alive_dead_f1", "team_acc", "trans_f1_tight")
+# Dead-ball oracles (--oracle): the dead score replaced by the truth (1.0 on D, 0.0 on H / A) on
+# some frames, everything else unchanged. They say how much a perfect dead/alive call could gain,
+# and where: inside the cleaned ball's gaps or where the ball is seen. Truth X keeps our score.
+#   dead       every frame
+#   dead_gaps  only frames where the cleaned ball is missing
+#   dead_seen  only frames where the cleaned ball is seen
+ORACLES = ("dead", "dead_gaps", "dead_seen")
+ORACLE_TAG = " + oracle "         # report name: "<config> + oracle <mode>"
 
 
 @dataclass
@@ -853,16 +862,217 @@ def _stage_key(cfg):
     return json.dumps(rest, sort_keys=True, default=str)
 
 
-def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0, tags=False):
+# --- why possessions are missed (--diagnose) ----------------------------------------------------
+#
+# Counts only: how many true possessions (maximal H or A runs, as the metric builds them) we
+# miss at IoU 0.5, split by length, by how much of it the ball is seen, and by what we put there
+# instead; and the same for our possessions that match nothing (fake). No frame numbers leave.
+SPELL_BINS_S = (0.0, 2.0, 5.0, 10.0, 20.0, float("inf"))
+MISSED_CAUSES = ("called_dead", "other_team", "merged", "cut_short")
+FAKE_CAUSES = ("over_dead", "over_other_team", "same_team")
+
+
+def _bin_names():
+    """'<2s', '2-5s', ..., '>20s' for SPELL_BINS_S."""
+    inner = SPELL_BINS_S[1:-1]
+    middle = [f"{a:g}-{b:g}s" for a, b in itertools.pairwise(inner)]
+    return [f"<{inner[0]:g}s", *middle, f">{inner[-1]:g}s"]
+
+
+def _bin(length_s):
+    return int(np.searchsorted(SPELL_BINS_S, length_s, side="right") - 1)
+
+
+def spell_diagnosis(truth, labels, ball_missing, fps=FPS):
+    """Aggregate counts that say which possessions we miss and which we invent.
+
+    Missed true possession (no same-team match at IoU 0.5, matched as the metric does), by what
+    we output over its frames (most frames):
+      called_dead  mostly D
+      other_team   mostly the other team
+      merged       mostly the right team, but in a possession of ours longer than it: we ran it
+                   together with a neighbour. Also counted: whether that possession of ours runs
+                   over a true stoppage (merged_over_dead) and over a true possession of the other
+                   team (merged_over_other_team); both can hold.
+      cut_short    mostly the right team, in a possession of ours shorter than it
+    Fake possession of ours (matched to nothing), by the truth under most of its frames:
+      over_dead, over_other_team, same_team (a piece of a true possession of the same team).
+    Plus counts per length bin (SPELL_BINS_S) and by ball seen on at least half its frames.
+    """
+    gt = pm.label_codes(truth)
+    pred = pm.label_codes(labels)
+    missing = np.asarray(ball_missing, dtype=bool)
+    runs = pm.valid_runs(gt)
+    pred = pm.fill_abstentions(pred, runs)
+    gt_spells = pm.possession_spells(gt, runs)
+    pred_spells = pm.possession_spells(pred, runs)
+    overlaps = pm.spell_overlaps(gt_spells, pred_spells)
+    gt_hit = pm.matched_gt_flags(overlaps, len(gt_spells), HEADLINE_IOU)
+    pred_hit = np.zeros(len(pred_spells), dtype=bool)
+    used = set()
+    for iou, i, j in overlaps:          # the same greedy match, seen from our side
+        if iou < HEADLINE_IOU:
+            break
+        if i in used or pred_hit[j]:
+            continue
+        used.add(i)
+        pred_hit[j] = True
+    pred_of = np.full(len(gt), -1)
+    for j, (a, b, _code) in enumerate(pred_spells):
+        pred_of[a:b] = j
+    d_code = pm.LABELS.index("D")
+    n_bins = len(SPELL_BINS_S) - 1
+
+    out = {
+        "truth_by_len": [0] * n_bins, "missed_by_len": [0] * n_bins,
+        "ours_by_len": [0] * n_bins, "fake_by_len": [0] * n_bins,
+        "truth_seen": 0, "missed_seen": 0, "truth_unseen": 0, "missed_unseen": 0,
+        **{cause: 0 for cause in MISSED_CAUSES},
+        "merged_over_dead": 0, "merged_over_other_team": 0,
+        **{cause: 0 for cause in FAKE_CAUSES},
+    }
+    for i, (a, b, code) in enumerate(gt_spells):
+        k = _bin((b - a) / fps)
+        seen = float((~missing[a:b]).mean()) >= 0.5
+        out["truth_by_len"][k] += 1
+        out["truth_seen" if seen else "truth_unseen"] += 1
+        if gt_hit[i]:
+            continue
+        out["missed_by_len"][k] += 1
+        out["missed_seen" if seen else "missed_unseen"] += 1
+        ours = pred[a:b]
+        same, other = int((ours == code).sum()), int(((ours != code) & (ours != d_code)).sum())
+        dead = int((ours == d_code).sum())
+        if dead >= max(same, other):
+            out["called_dead"] += 1
+        elif other > same:
+            out["other_team"] += 1
+        else:
+            # our same-team possession covering most of this one
+            inside = pred_of[a:b][ours == code]
+            j = int(np.bincount(inside).argmax())
+            pa, pb, _ = pred_spells[j]
+            if pb - pa > b - a:
+                out["merged"] += 1
+                under = gt[pa:pb]
+                out["merged_over_dead"] += int((under == d_code).any())
+                out["merged_over_other_team"] += int(
+                    ((under != code) & (under != d_code) & (under != pm.X)).any())
+            else:
+                out["cut_short"] += 1
+    for j, (a, b, code) in enumerate(pred_spells):
+        k = _bin((b - a) / fps)
+        out["ours_by_len"][k] += 1
+        if pred_hit[j]:
+            continue
+        out["fake_by_len"][k] += 1
+        under = gt[a:b]
+        counts = {"over_dead": int((under == d_code).sum()),
+                  "same_team": int((under == code).sum()),
+                  "over_other_team": int(((under != code) & (under != d_code)
+                                          & (under != pm.X)).sum())}
+        out[max(FAKE_CAUSES, key=lambda c: counts[c])] += 1
+    return out
+
+
+def _add_diagnoses(diagnoses):
+    """Sum spell_diagnosis outputs over matches."""
+    total = None
+    for d in diagnoses:
+        if total is None:
+            total = {k: (list(v) if isinstance(v, list) else v) for k, v in d.items()}
+            continue
+        for k, v in d.items():
+            total[k] = [x + y for x, y in zip(total[k], v)] if isinstance(v, list) else total[k] + v
+    return total
+
+
+def _diagnosis_lines(name, d):
+    """Report lines for one config's summed diagnosis."""
+    n_missed = sum(d["missed_by_len"])
+    n_fake = sum(d["fake_by_len"])
+
+    def share(x, n):
+        return f"{x} ({100 * x / n:.0f}%)" if n else f"{x}"
+
+    bins = _bin_names()
+    by_len = ", ".join(
+        f"{b} {m}/{t}" for b, m, t in zip(bins, d["missed_by_len"], d["truth_by_len"]))
+    fake_len = ", ".join(
+        f"{b} {f}/{o}" for b, f, o in zip(bins, d["fake_by_len"], d["ours_by_len"]))
+    missed_causes = ", ".join(f"{c} {share(d[c], n_missed)}" for c in MISSED_CAUSES)
+    fake_causes = ", ".join(f"{c} {share(d[c], n_fake)}" for c in FAKE_CAUSES)
+    head = (f"  {name}: missed {n_missed} of {sum(d['truth_by_len'])} true possessions, "
+            f"fake {n_fake} of {sum(d['ours_by_len'])} of ours")
+    seen = (f"    missed with the ball seen on >= half its frames: "
+            f"{d['missed_seen']}/{d['truth_seen']}, "
+            f"mostly unseen: {d['missed_unseen']}/{d['truth_unseen']}")
+    causes = (f"    missed because we output: {missed_causes}; merged runs over a true stoppage "
+              f"{d['merged_over_dead']}, over a true other-team possession "
+              f"{d['merged_over_other_team']}")
+    return [
+        head,
+        f"    missed by length (missed/truth): {by_len}",
+        seen,
+        causes,
+        f"    fake by length (fake/ours): {fake_len}",
+        f"    fake, truth under it: {fake_causes}",
+    ]
+
+
+def oracle_dead_score(dead_score, truth, ball_missing, mode):
+    """The dead score with the truth put in on the frames `mode` covers (see ORACLES).
+
+    1.0 where the truth is D, 0.0 where it is H or A; truth X and frames outside the mode keep
+    our own score. ball_missing: bool[n], True where the CLEANED ball is missing.
+    """
+    if mode not in ORACLES:
+        raise ValueError(f"unknown oracle '{mode}', expected one of {', '.join(ORACLES)}")
+    truth = np.asarray(truth)
+    missing = np.asarray(ball_missing, dtype=bool)
+    if truth.shape != missing.shape or len(truth) != len(dead_score):
+        raise ValueError("dead score, truth and ball_missing must have one value per frame")
+    where = {"dead": np.ones_like(missing), "dead_gaps": missing, "dead_seen": ~missing}[mode]
+    where = where & np.isin(truth, ("H", "A", "D"))
+    out = np.array(dead_score, dtype=np.float64, copy=True)
+    out[where] = (truth[where] == "D").astype(np.float64)
+    return out
+
+
+def oracle_name(name, mode):
+    """The report name of config `name` run with oracle `mode`."""
+    return f"{name}{ORACLE_TAG}{mode}"
+
+
+def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0, tags=False, oracles=(),
+               diagnose=False):
     """Score every config on every match. The degraded ball is the same for every config.
 
     configs: {name: loaded pipeline config}. matches: list of DevMatch.
     bootstrap_n: spellF1 bootstrap draws per match (0 = off, it is slow).
     tags: give every match simulated restart tags (simulate_tags, dev_cfg["tags"]). They are
     drawn with their own seed, so the degraded ball is the same with or without them.
-    Returns {"matches": {id: {"ball_missing": share, **report}}, "scores": {name: {id: score}}}.
+    oracles: modes from ORACLES. Each config is also run once per mode, with the dead score
+    replaced by the truth where the mode says (oracle_dead_score), on the same cut ball, and
+    scored as "<config> + oracle <mode>". Without oracles the result is exactly as before.
+    Returns {"matches": {id: {"ball_missing": share, **report}}, "scores": {name: {id: score}}},
+    plus "oracle_of": {oracle name: config name} when oracles were asked for, and
+    "diagnosis": {name: {id: spell_diagnosis}} when diagnose is True.
     """
-    out = {"matches": {}, "scores": {name: {} for name in configs}}
+    oracles = tuple(dict.fromkeys(oracles))
+    for mode in oracles:
+        if mode not in ORACLES:
+            raise ValueError(f"unknown oracle '{mode}', expected one of {', '.join(ORACLES)}")
+    names = {}
+    for name in configs:
+        names[name] = None
+        for mode in oracles:
+            names[oracle_name(name, mode)] = name
+    out = {"matches": {}, "scores": {name: {} for name in names}}
+    if oracles:
+        out["oracle_of"] = {name: base for name, base in names.items() if base is not None}
+    if diagnose:
+        out["diagnosis"] = {name: {} for name in names}
     for dev in matches:
         match = dev.match
         if degrade:
@@ -885,6 +1095,19 @@ def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0, tags=Fals
                 prepared[key] = prepare_stages(match, cfg)
             labels = predict_labels(match, cfg, prepared[key])
             out["scores"][name][dev.match_id] = score_labels(dev.truth, labels, bootstrap_n)
+            cleaned, track, dead_score = prepared[key]
+            missing = np.isnan(cleaned.ball_xy[:, 0])
+            if diagnose:
+                out["diagnosis"][name][dev.match_id] = spell_diagnosis(
+                    dev.truth, labels, missing, match.fps)
+            for mode in oracles:
+                oracle = oracle_dead_score(dead_score, dev.truth, missing, mode)
+                labels = predict_labels(match, cfg, (cleaned, track, oracle))
+                out["scores"][oracle_name(name, mode)][dev.match_id] = score_labels(
+                    dev.truth, labels, bootstrap_n)
+                if diagnose:
+                    out["diagnosis"][oracle_name(name, mode)][dev.match_id] = spell_diagnosis(
+                        dev.truth, labels, missing, match.fps)
     return out
 
 
@@ -1033,32 +1256,56 @@ def format_report(result, degrade=True):
             lines.append(f"  {match_id}")
             lines.extend(_match_lines(s))
 
-    if len(names) > 1:
-        base_name = names[0]
-        base = result["scores"][base_name]
+    oracle_of = result.get("oracle_of", {})
+    plain = [name for name in names if name not in oracle_of]
+    if len(plain) > 1:
+        base_name = plain[0]
         lines.append(
             f"paired spellF1 difference against {base_name} "
             f"(differences under {pm.SPELL_NOISE_BAND} are noise):"
         )
-        for name in names[1:]:
-            scores = result["scores"][name]
-            diff, wins, count = paired_difference(scores, base)
-            extra = ", ".join(
-                f"{metric} {_signed3(paired_difference(scores, base, metric)[0])}"
-                for metric in PAIRED_EXTRA
-            )
-            lines.append(
-                f"  {name}: {diff:+.3f}, better on {wins} of {count} matches "
-                f"({_verdict(diff)}); mean {extra}"
-            )
-            for match_id, s in scores.items():
-                b = base[match_id]
-                one = s["spellF1"] - b["spellF1"]
-                per_metric = ", ".join(
-                    f"{metric} {_signed3(_diff(s, b, metric))}" for metric in PAIRED_EXTRA
-                )
-                lines.append(f"    {match_id}: spellF1 {one:+.3f} ({_verdict(one)}), {per_metric}")
+        for name in plain[1:]:
+            lines.extend(_paired_lines(name, result["scores"][name], result["scores"][base_name]))
+    if oracle_of:
+        lines.append(
+            "dead oracle: paired spellF1 difference against the same config without it "
+            "(truth put into the dead score; truth X keeps ours):"
+        )
+        for name, base_name in oracle_of.items():
+            lines.extend(_paired_lines(name, result["scores"][name], result["scores"][base_name],
+                                       counts=True))
+    if "diagnosis" in result:
+        lines.append("why possessions are missed (counts summed over the matches, IoU "
+                     f"{HEADLINE_IOU}):")
+        for name, per_match in result["diagnosis"].items():
+            lines.extend(_diagnosis_lines(name, _add_diagnoses(per_match.values())))
     return "\n".join(lines)
+
+
+def _paired_lines(name, scores, base, counts=False):
+    """One overall line of the paired difference of `scores` against `base`, then one per match.
+
+    counts: also give our possession count per match (with and without) and the true one.
+    """
+    diff, wins, count = paired_difference(scores, base)
+    extra = ", ".join(
+        f"{metric} {_signed3(paired_difference(scores, base, metric)[0])}"
+        for metric in PAIRED_EXTRA
+    )
+    lines = [(f"  {name}: {diff:+.3f}, better on {wins} of {count} matches "
+              f"({_verdict(diff)}); mean {extra}")]
+    for match_id, s in scores.items():
+        b = base[match_id]
+        one = s["spellF1"] - b["spellF1"]
+        per_metric = ", ".join(
+            f"{metric} {_signed3(_diff(s, b, metric))}" for metric in PAIRED_EXTRA
+        )
+        line = f"    {match_id}: spellF1 {one:+.3f} ({_verdict(one)}), {per_metric}"
+        if counts:
+            line += (f", possessions {s['our_possessions']} (was {b['our_possessions']}, "
+                     f"truth {s['truth_possessions']})")
+        lines.append(line)
+    return lines
 
 
 # --- checking the file layout ------------------------------------------------------------------

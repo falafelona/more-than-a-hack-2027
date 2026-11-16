@@ -19,6 +19,12 @@
 #                  Slow: matches x configs x N draws. Use it for the final choice between configs.
 #   --tags         give each match simulated restart tags (configs/devset.yaml, tags:), so the
 #                  tag clues (before_restart, gap_chance restart_tag_after) can be judged
+#   --oracle MODE  also run every config with the dead score replaced by the truth (repeatable):
+#                  dead (every frame), dead_gaps (cleaned ball missing), dead_seen (ball seen).
+#                  Reported against the same config without it: the most a better dead/alive
+#                  call could gain, and where. Not a config to submit.
+#   --diagnose     also count, per config, which true possessions are missed (by length, ball
+#                  seen or not, and what we output instead) and which of ours are fake
 #   --summary      only shapes and label counts per match (checks that the files load)
 #   --inspect FILE print the element and attribute NAMES of one IDSSE XML file (no values)
 # Prints aggregates only: no frame numbers, no positions, and it writes no files except the
@@ -56,6 +62,11 @@ def main(argv=None):
     parser.add_argument("--tags", action="store_true",
                         help="give each match simulated restart tags (the tags section of the "
                         "devset config), so the tag clues can be judged")
+    parser.add_argument("--oracle", action="append", choices=devset.ORACLES, default=[],
+                        help="also run each config with the dead score from the truth on these "
+                        "frames (repeatable): dead, dead_gaps, dead_seen")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="count why possessions are missed or fake (aggregates only)")
     parser.add_argument("--summary", action="store_true", help="only shapes and counts")
     parser.add_argument("--inspect", default=None, help="print the XML structure of one file")
     parser.add_argument(
@@ -94,7 +105,8 @@ def main(argv=None):
         parser.error("two configs have the same file name")
     degrade = not args.clean_ball
     result = devset.run_devset(
-        configs, dev_cfg, matches, degrade=degrade, bootstrap_n=args.bootstrap, tags=args.tags
+        configs, dev_cfg, matches, degrade=degrade, bootstrap_n=args.bootstrap, tags=args.tags,
+        oracles=args.oracle, diagnose=args.diagnose,
     )
     print(devset.format_report(result, degrade=degrade))
     return 0
