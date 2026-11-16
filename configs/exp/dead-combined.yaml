@@ -17,6 +17,11 @@ deadball:
   out_margin: 1.0         # metres past the line before we call it out
   still_speed: 1.0        # m/s, a bit slower than walking pace
   still_seconds: 3        # how long the players must stay slow
+  speed:                  # player speed from positions (velocity.player_speed); the ATD speed field is not used
+    half_window_s: 0.2    # s on each side of the frame: the line fit averages out tracking jitter
+    min_points: 5         # seen positions needed in that window
+    min_each_side: 2      # seen positions needed before AND after the frame
+    max_speed: 12.0       # m/s, above any sprint: a bigger jump is a tracklet swap, so the track is cut there
   restart_seconds:        # seconds of dead ball before each restart tag. Too long reaches into live play
     throw-in: 8
     corner kick: 15

@@ -18,7 +18,8 @@
 #           (#19, task 2.3)
 #   interpolate  fills short gaps with a straight line between the last and the next seen
 #           ball (#30, task 2.4). Can run `reject` first.
-# To add another (#35 kalman), write the function and add one line to METHODS.
+# To add another, write the function and add one line to METHODS. Kalman (#35) was tried
+# in PR #26 and dropped: it tied with interpolate on the dev set.
 #
 # NOTE: no `from __future__ import annotations` here. tests/test_pipeline.py checks that
 # DataCleaner.__init__.__annotations__["raw_data"] is Match, and that needs a real object,

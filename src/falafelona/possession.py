@@ -14,6 +14,7 @@
 
 import numpy as np
 
+from falafelona import velocity
 from falafelona.io import Match
 
 # The four published baseline variants: (name, half-width of the vote window in frames).
@@ -193,6 +194,229 @@ def margin_team_costs(d_home: np.ndarray, d_away: np.ndarray, team_cost: float,
     return costs
 
 
+def fast_ball_frames(speed: np.ndarray, threshold: float) -> np.ndarray:
+    """bool[n]: frames where the ball moves faster than `threshold` m/s (a pass or a shot).
+
+    NaN speed (ball unknown, or too few positions for the fit) is not fast: there the
+    distance evidence is used as before.
+    """
+    speed = np.asarray(speed, dtype=np.float64)
+    return np.isfinite(speed) & (speed > threshold)
+
+
+def drop_fast_ball_evidence(team_costs: np.ndarray, fast: np.ndarray) -> np.ndarray:
+    """float[n, 2]: the H and A costs with no evidence (0) on fast-ball frames.
+
+    A player the ball flies past is often the nearest one without touching it, so on those
+    frames nobody gets evidence and the current owner holds until someone receives the ball.
+    """
+    costs = np.array(team_costs, dtype=np.float64)
+    costs[np.asarray(fast, dtype=bool)] = 0.0
+    return costs
+
+
+def _fast_ball(match, section):
+    """bool[n] fast-ball frames, or None when possession.fast_ball_speed is not set (off)."""
+    if "fast_ball_speed" not in section:
+        return None
+    threshold = section["fast_ball_speed"]
+    if (isinstance(threshold, bool) or not isinstance(threshold, int | float)
+            or not np.isfinite(threshold) or threshold <= 0):
+        raise ValueError(f"possession.fast_ball_speed must be a number > 0, got {threshold!r}")
+    if "velocity" not in section:
+        raise ValueError("possession.fast_ball_speed needs a possession.velocity block "
+                         "(half_window_s, min_points, min_each_side)")
+    _, speed = velocity.ball_velocity(match.ball_xy, match.period, match.fps,
+                                      section["velocity"])
+    return fast_ball_frames(speed, threshold)
+
+
+def nearest_slots(players_xy: np.ndarray, ball_xy: np.ndarray,
+                  slot_team: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """int[n] slot index of the nearest home and the nearest away player per frame.
+
+    -1 where that team has no tracked player or the ball is missing.
+    """
+    diff = players_xy - ball_xy[:, None, :]
+    dist = np.sqrt(np.sum(diff * diff, axis=2))
+    dist = np.where(np.isnan(dist), np.inf, dist)
+    slot = np.asarray(slot_team)
+    nearest = []
+    for team in ("H", "A"):
+        cols = np.flatnonzero(slot == team)
+        if cols.size == 0:
+            nearest.append(np.full(len(dist), -1))
+            continue
+        pick = np.argmin(dist[:, cols], axis=1)
+        found = np.isfinite(dist[np.arange(len(dist)), cols[pick]])
+        nearest.append(np.where(found, cols[pick], -1))
+    return nearest[0], nearest[1]
+
+
+def player_velocities(players_xy: np.ndarray, period: np.ndarray, fps: float,
+                      section: dict) -> np.ndarray:
+    """float[n, n_slots, 2] velocity of every slot in m/s, with the ball's line fit.
+
+    Same settings and same rules as velocity.ball_velocity (NaN where too few positions,
+    each half on its own), one slot at a time.
+    """
+    settings = velocity.velocity_settings(section, fps)
+    out = np.full(players_xy.shape, np.nan)
+    for half in (1, 2):
+        frames = np.flatnonzero(period == half)
+        if not frames.size:
+            continue
+        part = slice(frames[0], frames[-1] + 1)
+        for slot in range(players_xy.shape[1]):
+            track = players_xy[part, slot]
+            if np.isnan(track).all():
+                continue
+            out[part, slot] = velocity._slopes(track, **settings) * fps
+    return out
+
+
+def _slot_velocity(v_players: np.ndarray, slots: np.ndarray) -> np.ndarray:
+    """float[n, 2] velocity of the given slot on each frame, NaN where the slot is -1."""
+    rows = np.arange(len(slots))
+    v = v_players[rows, np.maximum(slots, 0)]
+    v[slots < 0] = np.nan
+    return v
+
+
+def velocity_match_costs(v_ball: np.ndarray, v_home: np.ndarray, v_away: np.ndarray,
+                         d_home: np.ndarray, d_away: np.ndarray, max_diff: float,
+                         control_distance: float, cost: float) -> np.ndarray:
+    """float[n, 2] extra H and A costs: a player who moves WITH the ball controls it.
+
+    A team "matches" on a frame when its nearest player is within control_distance of the
+    ball and the ball's velocity differs from his by less than max_diff m/s (dribbling, or
+    the ball at his feet). If only one team matches, the other team's state costs `cost`.
+    Both or neither matching, or any NaN velocity: no extra cost.
+    """
+    def matches(v_player, d):
+        gap = np.hypot(*(v_ball - v_player).T)
+        return np.isfinite(gap) & (gap < max_diff) & (np.asarray(d) < control_distance)
+
+    home, away = matches(v_home, d_home), matches(v_away, d_away)
+    costs = np.zeros((len(v_ball), 2))
+    costs[home & ~away, A_STATE] = cost      # home controls it: evidence against A
+    costs[away & ~home, H_STATE] = cost      # away controls it: evidence against H
+    return costs
+
+
+def _velocity_match(match, section):
+    """float[n, 2] velocity-match costs, or None when possession.velocity_match is not set."""
+    if "velocity_match" not in section:
+        return None
+    block = section["velocity_match"]
+    if not isinstance(block, dict):
+        raise TypeError("possession.velocity_match must be a mapping "
+                         "(max_diff, control_distance, cost)")
+    values = {}
+    for key in ("max_diff", "control_distance", "cost"):
+        value = block.get(key)
+        if (isinstance(value, bool) or not isinstance(value, int | float)
+                or not np.isfinite(value) or value <= 0):
+            raise ValueError(f"possession.velocity_match.{key} must be a number > 0, "
+                             f"got {value!r}")
+        values[key] = float(value)
+    if "velocity" not in section:
+        raise ValueError("possession.velocity_match needs a possession.velocity block "
+                         "(half_window_s, min_points, min_each_side)")
+
+    v_ball, _ = velocity.ball_velocity(match.ball_xy, match.period, match.fps,
+                                       section["velocity"])
+    v_players = player_velocities(match.players_xy, match.period, match.fps,
+                                  section["velocity"])
+    i_home, i_away = nearest_slots(match.players_xy, match.ball_xy, match.slot_team)
+    d_home, d_away = team_distances(match.players_xy, match.ball_xy, match.slot_team)
+    return velocity_match_costs(v_ball, _slot_velocity(v_players, i_home),
+                                _slot_velocity(v_players, i_away), d_home, d_away,
+                                values["max_diff"], values["control_distance"],
+                                values["cost"])
+
+
+def lag_team_costs(team_costs: np.ndarray, lag: int) -> np.ndarray:
+    """float[n, 2]: the H and A costs moved `lag` frames later (team[t] <- team[t - lag]).
+
+    The first `lag` frames get no evidence (0), so the current owner holds there. The receiver
+    gets closer before he touches the ball, so unshifted evidence switches too early.
+    """
+    team_costs = np.asarray(team_costs, dtype=np.float64)
+    if lag == 0:
+        return team_costs
+    shifted = np.zeros_like(team_costs)
+    if lag < len(team_costs):
+        shifted[lag:] = team_costs[:-lag]
+    return shifted
+
+def restart_team_costs(codes: np.ndarray, dead_score: np.ndarray, threshold: float,
+                       min_dead: int, look: int, boost: int, cost: float) -> np.ndarray:
+    """float[n, 2]: extra H and A costs for the team that takes each restart.
+
+    A dead spell is a run of at least min_dead frames with dead_score >= threshold. Where it
+    ends, the team nearest the ball most often in the `look` frames on either side of the end
+    (codes: HOME / AWAY / NOBODY per frame) is taking the restart. For the `boost` frames
+    after the end, the other team's state costs `cost` per frame. A tie gives no evidence.
+    """
+    codes = np.asarray(codes)
+    n = len(codes)
+    costs = np.zeros((n, 2))
+    dead = np.clip(np.nan_to_num(np.asarray(dead_score, dtype=np.float64)), 0, 1) >= threshold
+    padded = np.concatenate(([False], dead, [False]))
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    for first, stop in zip(edges[0::2], edges[1::2], strict=True):
+        if stop - first < min_dead or stop >= n:
+            continue
+        window = codes[max(first, stop - look):min(n, stop + look)]
+        home = int(np.sum(window == Possession.HOME))
+        away = int(np.sum(window == Possession.AWAY))
+        if home == away:
+            continue
+        other = A_STATE if home > away else H_STATE
+        costs[stop:stop + boost, other] += cost
+    return costs
+
+
+RESTART_KEYS = ("threshold", "min_dead_s", "look_s", "boost_s", "cost")
+
+# Every setting the `possession:` section may hold ("" = the section itself, else a nested
+# block). config.load_config refuses any other name: several features switch on just by being
+# present (evidence_lag, fast_ball_speed, velocity_match, restart), so a misspelt key would
+# otherwise switch one off without an error. A new setting must be added here.
+CONFIG_KEYS = {
+    "": ("method", "window", "dead_threshold", "dead_margin", "switch_cost", "team_evidence",
+         "team_cost", "margin_scale", "near_distance", "dead_weight", "to_dead_cost",
+         "from_dead_cost", "evidence_lag", "fast_ball_speed", "velocity_match", "velocity",
+         "restart", "switch_placement"),
+    "velocity": velocity.SETTING_KEYS,
+    "velocity_match": ("max_diff", "control_distance", "cost"),
+    "restart": RESTART_KEYS,
+}
+
+
+def _restart(match, dead_score, section):
+    """float[n, 2] restart costs, or None when possession.restart is not set (off)."""
+    if "restart" not in section:
+        return None
+    block = section["restart"]
+    if not isinstance(block, dict):
+        raise TypeError("possession.restart must be a mapping (" + ", ".join(RESTART_KEYS) + ")")
+    values = {}
+    for key in RESTART_KEYS:
+        value = block.get(key)
+        if (isinstance(value, bool) or not isinstance(value, int | float)
+                or not np.isfinite(value) or value <= 0):
+            raise ValueError(f"possession.restart.{key} must be a number > 0, got {value!r}")
+        values[key] = float(value)
+    fps = match.fps
+    codes, _ = Possession(match).nearest_player_labels()
+    return restart_team_costs(codes, dead_score, values["threshold"],
+                              max(1, round(values["min_dead_s"] * fps)),
+                              max(1, round(values["look_s"] * fps)),
+                              max(1, round(values["boost_s"] * fps)), values["cost"])
+
+
 def add_dead_costs(team_costs: np.ndarray, dead_score: np.ndarray,
                    dead_weight: float) -> np.ndarray:
     """float[n, 3]: the H and A costs plus the D column from dead_score p in 0..1.
@@ -221,6 +445,51 @@ def switch_table(switch_cost: float, to_dead_cost: float, from_dead_cost: float)
     ])
 
 
+TIE_TOLERANCE = 1e-9
+
+
+def place_switches(path: np.ndarray, costs: np.ndarray, fraction: float) -> np.ndarray:
+    """int[n]: `path` with every H <-> A switch moved inside the frames where it costs nothing.
+
+    Where no team has evidence (the ball is missing, flying, or far from everybody) H and A cost
+    the same, so Viterbi can put the switch anywhere in that stretch for the same total cost.
+    On ties staying wins, so it puts the switch at the earliest frame (it switches as soon as the
+    evidence stops). The truth usually changes when the ball arrives, nearer the end of the stretch.
+
+    For a switch from a to b, look at the frames around it where costs[:, H] == costs[:, A]:
+      earliest = where the run of such frames labelled a, just before the switch, starts
+      latest   = where the run of such frames labelled b, from the switch on, ends
+    and the first frame labelled b moves to earliest + round(fraction * (latest - earliest)):
+    0 keeps Viterbi's earliest frame, 1 waits until the first frame with evidence.
+
+    The total cost does not change: only frames with equal H and A cost change their label, and a
+    switch through D is not touched. Pure function: the input is not modified.
+    """
+    path = np.array(path, dtype=np.int64)
+    costs = np.asarray(costs, dtype=np.float64)
+    n = len(path)
+    if n < 2:
+        return path
+    tie = np.abs(costs[:, H_STATE] - costs[:, A_STATE]) <= TIE_TOLERANCE
+    team = path <= A_STATE
+    boundaries = np.flatnonzero(team[1:] & team[:-1] & (path[1:] != path[:-1])) + 1
+
+    for t in boundaries:                       # left to right, each one sees the moves before it
+        before, after = path[t - 1], path[t]
+        start = t
+        while start > 0 and tie[start - 1] and path[start - 1] == before:
+            start -= 1
+        stop = t
+        while stop < n and tie[stop] and path[stop] == after:
+            stop += 1
+        target = start + int(np.floor(fraction * (stop - start) + 0.5))
+        if target > t:
+            path[t:target] = before
+        elif target < t:
+            path[target:t] = after
+    return path
+
+
 def _number(section, key, *, whole=False):
     """A config value that must be a number >= 0 (and a whole number if `whole`)."""
     if key not in section:
@@ -231,6 +500,17 @@ def _number(section, key, *, whole=False):
         kind = "a whole number" if whole else "a number"
         raise ValueError(f"possession.{key} must be {kind} >= 0, got {value!r}")
     return value
+
+
+def _placement(section):
+    """The switch_placement fraction (0 to 1), or None when it is not set (off)."""
+    if "switch_placement" not in section:
+        return None
+    value = section["switch_placement"]
+    if (isinstance(value, bool) or not isinstance(value, int | float) or not np.isfinite(value)
+            or not 0 <= value <= 1):
+        raise ValueError(f"possession.switch_placement must be a number from 0 to 1, got {value!r}")
+    return float(value)
 
 
 def _team_codes(match, dead_score, section):
@@ -247,6 +527,13 @@ def _hmm(match, dead_score, section):
     """3-state HMM: H, A and D decoded together with Viterbi.
 
     team_evidence: "nearest" (0/1 nearest player, the default) or "margin" (distance margin).
+    evidence_lag: frames to move the H / A evidence later (default 0). D is not moved.
+    fast_ball_speed: m/s; above it the H / A evidence is dropped (default: not set = off).
+        Needs a `velocity:` block for velocity.ball_velocity.
+    velocity_match: {max_diff, control_distance, cost}; extra evidence for the team whose
+        nearest player moves with the ball (default: not set = off). Needs `velocity:` too.
+    switch_placement: 0 to 1; where an H <-> A switch goes inside a stretch with no evidence
+        (default: not set = off = the earliest frame, as Viterbi leaves it). See place_switches.
     """
     evidence = section.get("team_evidence", "nearest")
     if evidence not in TEAM_EVIDENCE:
@@ -267,8 +554,25 @@ def _hmm(match, dead_score, section):
                                  _number(section, "margin_scale"),
                                  _number(section, "near_distance"))
 
+    extra = _velocity_match(match, section)
+    if extra is not None:
+        team = team + extra
+
+    fast = _fast_ball(match, section)
+    if fast is not None:
+        team = drop_fast_ball_evidence(team, fast)
+
+    lag = _number(section, "evidence_lag", whole=True) if "evidence_lag" in section else 0
+    team = lag_team_costs(team, lag)
+    restart = _restart(match, dead_score, section)
+    if restart is not None:
+        team = team + restart
     costs = add_dead_costs(team, dead_score, dead_weight)
-    return np.array(STATES)[viterbi(costs, table)]
+    path = viterbi(costs, table)
+    placement = _placement(section)
+    if placement is not None:
+        path = place_switches(path, costs, placement)
+    return np.array(STATES)[path]
 
 
 def _nearest_majority(match, dead_score, section):

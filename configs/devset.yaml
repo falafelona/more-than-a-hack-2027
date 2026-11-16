@@ -57,3 +57,28 @@ degrade:
                           # outside the pitch (many are real: the ball out of play) do not say how many are wrong
     min_s: 0.04           # shortest wrong stretch (s)
     max_s: 0.2            # longest wrong stretch (s)
+
+# Simulated Smart Tagging restarts (review finding 2), used only with --tags (make devset TAGS=1).
+# IDSSE has no Smart Tagging, so without them every tag clue gives 0 on the dev set. Each match
+# gets restart tags made from its own truth (devset.simulate_tags): one at the end of a dead-ball
+# spell, typed by where the ball is when play restarts, as many per graded frame as on our match.
+# Assumptions (so a win with tags is weaker evidence): types always right, no false tags, and the
+# tag starts as the restart is taken. Off by default, so the earlier RESULTS.md rows reproduce.
+tags:
+  our_counts:             # restarts per type on OUR match (dead-ball EDA, #28: 58 in all)
+    throw-in: 26
+    corner kick: 12
+    goal kick: 10
+    free kick: 5
+    kick off (after goal): 5
+  our_graded_frames: 158857   # graded frames of our match (ball EDA, #13): the counts above per this
+  min_dead_s: 1.0         # a dead-ball spell shorter than this is not taken as a restart
+  offset_s: [-1.0, 1.0]   # tag start = the first live frame after the spell + a uniform offset (s).
+                          # NOT measured on our match: change it if a human-run EDA measures it
+  # The restart type, from where the ball is when play restarts (metres; the dev match's pitch)
+  centre_m: 3.0           # this close to the centre spot: kick off (after goal)
+  corner_m: 3.0           # this close to a goal line AND a touchline: corner kick
+  touchline_m: 2.0        # this close to a touchline, or past it: throw-in
+  goal_area_m: 7.0        # this close to a goal line (goal area 5.5 m, plus slack) ...
+  goal_area_half_width_m: 11.0   # ... and this close to the middle (goal area 9.16 m): goal kick
+                          # anywhere else: free kick
