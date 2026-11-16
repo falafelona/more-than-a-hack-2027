@@ -380,6 +380,20 @@ def restart_team_costs(codes: np.ndarray, dead_score: np.ndarray, threshold: flo
 
 RESTART_KEYS = ("threshold", "min_dead_s", "look_s", "boost_s", "cost")
 
+# Every setting the `possession:` section may hold ("" = the section itself, else a nested
+# block). config.load_config refuses any other name: several features switch on just by being
+# present (evidence_lag, fast_ball_speed, velocity_match, restart), so a misspelt key would
+# otherwise switch one off without an error. A new setting must be added here.
+CONFIG_KEYS = {
+    "": ("method", "window", "dead_threshold", "dead_margin", "switch_cost", "team_evidence",
+         "team_cost", "margin_scale", "near_distance", "dead_weight", "to_dead_cost",
+         "from_dead_cost", "evidence_lag", "fast_ball_speed", "velocity_match", "velocity",
+         "restart"),
+    "velocity": velocity.SETTING_KEYS,
+    "velocity_match": ("max_diff", "control_distance", "cost"),
+    "restart": RESTART_KEYS,
+}
+
 
 def _restart(match, dead_score, section):
     """float[n, 2] restart costs, or None when possession.restart is not set (off)."""

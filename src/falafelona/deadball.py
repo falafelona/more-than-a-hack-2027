@@ -49,6 +49,19 @@ GAP_SETTINGS = ("line_distance", "spot_distance", "tag_seconds", "length_weight"
 GAP_CLUES = ("last_seen_near_line", "reappears_near_line", "reappears_at_centre",
              "players_still", "restart_tag_after")
 
+# Every setting the `deadball:` section may hold ("" = the section itself, else a nested block).
+# config.load_config refuses any other name, so a misspelt setting fails loudly instead of being
+# ignored. `weights`, `gap.weights` and `restart_seconds` are checked by check_config. A new
+# setting must be added here.
+CONFIG_KEYS = {
+    "": ("method", "weights", "out_margin", "still_speed", "still_seconds", "speed",
+         "still_ball_speed", "still_ball_seconds", "spot_line_m", "spot_centre_m",
+         "goal_area_depth_m", "goal_area_half_width_m", "ball_speed", "gap", "restart_seconds"),
+    "speed": SPEED_KEYS,
+    "ball_speed": velocity.SETTING_KEYS,
+    "gap": ("intercept", *GAP_SETTINGS, "weights"),
+}
+
 
 class DeadBall:
     """Scores how likely each frame is dead ball (0 = alive, 1 = dead)."""
