@@ -431,6 +431,51 @@ def switch_table(switch_cost: float, to_dead_cost: float, from_dead_cost: float)
     ])
 
 
+TIE_TOLERANCE = 1e-9
+
+
+def place_switches(path: np.ndarray, costs: np.ndarray, fraction: float) -> np.ndarray:
+    """int[n]: `path` with every H <-> A switch moved inside the frames where it costs nothing.
+
+    Where no team has evidence (the ball is missing, flying, or far from everybody) H and A cost
+    the same, so Viterbi can put the switch anywhere in that stretch for the same total cost.
+    On ties staying wins, so it puts the switch at the earliest frame (it switches as soon as the
+    evidence stops). The truth usually changes when the ball arrives, nearer the end of the stretch.
+
+    For a switch from a to b, look at the frames around it where costs[:, H] == costs[:, A]:
+      earliest = where the run of such frames labelled a, just before the switch, starts
+      latest   = where the run of such frames labelled b, from the switch on, ends
+    and the first frame labelled b moves to earliest + round(fraction * (latest - earliest)):
+    0 keeps Viterbi's earliest frame, 1 waits until the first frame with evidence.
+
+    The total cost does not change: only frames with equal H and A cost change their label, and a
+    switch through D is not touched. Pure function: the input is not modified.
+    """
+    path = np.array(path, dtype=np.int64)
+    costs = np.asarray(costs, dtype=np.float64)
+    n = len(path)
+    if n < 2:
+        return path
+    tie = np.abs(costs[:, H_STATE] - costs[:, A_STATE]) <= TIE_TOLERANCE
+    team = path <= A_STATE
+    boundaries = np.flatnonzero(team[1:] & team[:-1] & (path[1:] != path[:-1])) + 1
+
+    for t in boundaries:                       # left to right, each one sees the moves before it
+        before, after = path[t - 1], path[t]
+        start = t
+        while start > 0 and tie[start - 1] and path[start - 1] == before:
+            start -= 1
+        stop = t
+        while stop < n and tie[stop] and path[stop] == after:
+            stop += 1
+        target = start + int(np.floor(fraction * (stop - start) + 0.5))
+        if target > t:
+            path[t:target] = before
+        elif target < t:
+            path[target:t] = after
+    return path
+
+
 def _number(section, key, *, whole=False):
     """A config value that must be a number >= 0 (and a whole number if `whole`)."""
     if key not in section:
@@ -441,6 +486,17 @@ def _number(section, key, *, whole=False):
         kind = "a whole number" if whole else "a number"
         raise ValueError(f"possession.{key} must be {kind} >= 0, got {value!r}")
     return value
+
+
+def _placement(section):
+    """The switch_placement fraction (0 to 1), or None when it is not set (off)."""
+    if "switch_placement" not in section:
+        return None
+    value = section["switch_placement"]
+    if (isinstance(value, bool) or not isinstance(value, int | float) or not np.isfinite(value)
+            or not 0 <= value <= 1):
+        raise ValueError(f"possession.switch_placement must be a number from 0 to 1, got {value!r}")
+    return float(value)
 
 
 def _team_codes(match, dead_score, section):
@@ -462,6 +518,8 @@ def _hmm(match, dead_score, section):
         Needs a `velocity:` block for velocity.ball_velocity.
     velocity_match: {max_diff, control_distance, cost}; extra evidence for the team whose
         nearest player moves with the ball (default: not set = off). Needs `velocity:` too.
+    switch_placement: 0 to 1; where an H <-> A switch goes inside a stretch with no evidence
+        (default: not set = off = the earliest frame, as Viterbi leaves it). See place_switches.
     """
     evidence = section.get("team_evidence", "nearest")
     if evidence not in TEAM_EVIDENCE:
@@ -496,7 +554,11 @@ def _hmm(match, dead_score, section):
     if restart is not None:
         team = team + restart
     costs = add_dead_costs(team, dead_score, dead_weight)
-    return np.array(STATES)[viterbi(costs, table)]
+    path = viterbi(costs, table)
+    placement = _placement(section)
+    if placement is not None:
+        path = place_switches(path, costs, placement)
+    return np.array(STATES)[path]
 
 
 def _nearest_majority(match, dead_score, section):
