@@ -22,12 +22,12 @@ import warnings
 
 import numpy as np
 
-from falafelona import velocity
+from falafelona import learned_dead, velocity
 from falafelona.io import select_tags
 
 METHODS = ("ball_missing", "out_of_bounds", "players_still", "still_ball", "still_ball_at_spot",
            "still_ball_before_restart", "gap_chance", "before_kickoff", "before_restart",
-           "combined")
+           "learned", "combined")
 # The Smart Tagging Type values that are restarts (DATA.md). Kick Off (Start) has its own method.
 RESTART_TYPES = ("throw-in", "corner kick", "goal kick", "free kick", "kick off (after goal)")
 # The settings each method reads from the config.
@@ -38,9 +38,11 @@ SETTINGS = {
     "still_ball_at_spot": ("still_ball_speed", "still_ball_seconds", "spot_line_m",
                            "spot_centre_m", "goal_area_depth_m", "goal_area_half_width_m"),
     "still_ball_before_restart": ("still_ball_speed", "still_ball_seconds"),
+    "learned": learned_dead.SETTINGS,
 }
 # The clues that read the ball's speed from its positions (the `ball_speed:` block).
-STILL_BALL_CLUES = ("still_ball", "still_ball_at_spot", "still_ball_before_restart")
+STILL_BALL_CLUES = ("still_ball", "still_ball_at_spot", "still_ball_before_restart",
+                    "learned")
 
 # players_still also needs the player speed block `speed:` (velocity.player_speed_settings).
 SPEED_KEYS = (*velocity.SETTING_KEYS, "max_speed")
@@ -56,10 +58,12 @@ GAP_CLUES = ("last_seen_near_line", "reappears_near_line", "reappears_at_centre"
 CONFIG_KEYS = {
     "": ("method", "weights", "out_margin", "still_speed", "still_seconds", "speed",
          "still_ball_speed", "still_ball_seconds", "spot_line_m", "spot_centre_m",
-         "goal_area_depth_m", "goal_area_half_width_m", "ball_speed", "gap", "restart_seconds"),
+         "goal_area_depth_m", "goal_area_half_width_m", "ball_speed", "gap", "restart_seconds",
+         "learned"),
     "speed": SPEED_KEYS,
     "ball_speed": velocity.SETTING_KEYS,
     "gap": ("intercept", *GAP_SETTINGS, "weights"),
+    "learned": learned_dead.CONFIG_KEYS,
 }
 
 
@@ -96,6 +100,8 @@ class DeadBall:
             return self.before_kickoff()
         elif method == "before_restart":
             return self.before_restart()
+        elif method == "learned":
+            return learned_dead.score(self.data, self.cfg)
         elif method == "combined":
             return self.combined()
         raise ValueError(f"unknown deadball method : {method}")
@@ -284,7 +290,7 @@ def check_config(section, fps=None):
         for key in SETTINGS.get(clue, ()):
             _number(section, key, f"deadball.{key}", needed_by=clue)
 
-    if "players_still" in used:
+    if "players_still" in used or "learned" in used:
         _check_speed_block(section.get("speed"), fps)
 
     if any(clue in used for clue in STILL_BALL_CLUES):
@@ -292,6 +298,9 @@ def check_config(section, fps=None):
 
     if "gap_chance" in used:
         _check_gap_block(section, fps)
+
+    if "learned" in used:
+        learned_dead.check_settings(section)
 
     if "before_restart" in used or "still_ball_before_restart" in used:
         restarts = section.get("restart_seconds")

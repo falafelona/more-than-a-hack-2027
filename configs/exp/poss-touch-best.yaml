@@ -1,0 +1,91 @@
+# Experiment: configs/final.yaml plus touch evidence (possession.touch). Where the ball's velocity
+# changes sharply, the nearest player touched it; his team gets evidence for hold_s from that frame.
+# Chosen on the dev set with seed 0 cuts from 21 touch/shape configs (experiments/RESULTS.md), then
+# confirmed on seed 1 cuts it was never tuned on. Paired vs final.yaml, better on 7/7 matches in all
+# four runs: seed 0 +0.056 / +0.060 (random / stoppage cuts), seed 1 +0.055 / +0.055.
+# Our match (label-free): D unchanged, 1,935 frames H <-> A, possessions 455 -> 501 (graded halves).
+seed: 0
+
+ball:
+  method: interpolate     # dev set: same score as none (+0.000), kept as the simplest gap filler (RESULTS.md)
+  max_gap: 0.5            # s: fill gaps up to this long with a straight line; longer gaps stay missing
+  max_speed: 40.0         # m/s: do not fill a gap if the ball could not have crossed it this fast
+  speed_slack: 1.0        # m: tracking noise allowed on top of max_speed * time
+
+deadball:
+  method: combined        # chance the ball is dead: each clue adds its weight where it fires, capped at 1
+  weights:
+    before_kickoff: 1.0   # certain: graded second-half frames before its kickoff are always dead
+    out_of_bounds: 1.0    # strongest clue: enough on its own
+    before_restart: 0.6   # enough on its own: before a tagged restart the ball is dead, even if players move
+    gap_chance: 1.0       # already a chance (0-1) inside each ball gap, 0 where the ball is seen
+    still_ball_at_spot: 0.6   # NEW: a seen ball standing still at a restart spot (free kick, throw-in, goal kick set up)
+  out_margin: 1.0         # metres past the line before we call it out
+  still_speed: 1.0        # m/s: players' median speed below this counts as standing (gap clue players_still)
+  speed:                  # player speed from positions (velocity.player_speed); the ATD speed field is not used
+    half_window_s: 0.2    # s on each side of the frame: the line fit averages out tracking jitter
+    min_points: 5         # seen positions needed in that window
+    min_each_side: 2      # seen positions needed before AND after the frame
+    max_speed: 12.0       # m/s, above any sprint: a bigger jump is a tracklet swap, so the track is cut there
+  still_ball_speed: 0.5   # NEW: m/s, a seen ball slower than this counts as standing still
+  still_ball_seconds: 2.0 # NEW: s it must stand still in a row (a short stop in open play does not count)
+  spot_line_m: 2.0        # NEW: m from a touchline or goal line (throw-in, corner); same as gap.line_distance
+  spot_centre_m: 3.0      # NEW: m from the centre spot (kickoff); same as gap.spot_distance
+  goal_area_depth_m: 5.5  # NEW: goal area (goal kick), laws of the game
+  goal_area_half_width_m: 9.16
+  ball_speed:             # NEW: ball speed from positions for the still-ball clue (velocity.ball_velocity)
+    half_window_s: 0.2    # s on each side of the frame: wider than for fast balls, so jitter averages out
+    min_points: 5
+    min_each_side: 2
+  gap:                    # gap_chance: log-odds added up per gap, then turned into a chance (0-1)
+    intercept: -1.0       # a 1 s gap with no clue: chance 0.27
+    length_weight: 0.25   # added per doubling of the gap's length: 8 s alone gives 0.44, 32 s gives 0.56
+    line_distance: 2.0    # m: "near a line" (ball EDA: 32% of gaps start within 2 m of a line, 9% of frames)
+    spot_distance: 3.0    # m: "at the centre spot"
+    tag_seconds: 5.0      # s: a restart tag this soon after the gap counts
+    weights:              # log-odds each clue adds where it holds; 0 switches a clue off
+      last_seen_near_line: 1.0    # an 8 s gap last seen near a line: 0.68
+      reappears_near_line: 1.0    # throw-in, corner or goal kick taken near a line
+      reappears_at_centre: 1.5    # kickoff after a goal
+      players_still: 2.0          # x the share of the gap with the players standing: all still, 8 s: 0.85
+      restart_tag_after: 0.0      # OFF: the dev set has no tags, so it cannot be tested (review finding 2)
+  restart_seconds:        # seconds of dead ball before each restart tag. Too long reaches into live play
+    throw-in: 8
+    corner kick: 15
+    goal kick: 20
+    free kick: 25
+    kick off (after goal): 45   # includes the celebration
+
+possession:
+  method: hmm
+  team_evidence: margin   # distance margin between the nearest home and away players
+  team_cost: 0.5          # weight of the margin evidence
+  margin_scale: 1.0       # m: a 3 m margin is about 95% sure
+  near_distance: 5.0      # m: nearest player this far away = no evidence
+  dead_weight: 2.0        # how strongly the dead score pulls towards D (and away from H / A)
+  switch_cost: 3.5        # cost of a change between H and A (was 7; the fast-ball rule removes fake switches)
+  to_dead_cost: 6.0       # cost of going from H or A into D
+  from_dead_cost: 6.0     # cost of leaving D for H or A
+  evidence_lag: 12        # frames (0.5 s): H / A evidence moved later; the receiver nears the ball before touching it
+  fast_ball_speed: 12     # m/s: no H / A evidence while the ball moves faster (pass or shot)
+  switch_placement: 0.75  # NEW: H / A switches placed 75% into their no-evidence stretch (Viterbi puts them at the earliest frame)
+  touch:                  # NEW: a sharp change of the ball's velocity = the nearest player touched it
+    offset_s: 0.12        # s: velocity before vs after, this far either side of the frame
+    min_change: 3.0       # m/s: change of velocity (direction or speed) that counts as a touch
+    distance: 2.0         # m: the toucher must be this close to the ball
+    margin: 0.1           # m: and the other team's nearest this much further (else a duel: no evidence)
+    hold_s: 0.8           # s from the touch on that get the evidence (not moved by evidence_lag)
+    cost: 2.0             # per frame on the other team (team_cost 0.5 = about one frame of full margin)
+  restart:                # NEW: the team near the ball where a dead spell ends takes the restart
+    threshold: 0.5        # dead score at or above this is dead
+    min_dead_s: 3.0       # s: only real stoppages, not a short dip in the dead score
+    look_s: 2.0           # s on each side of the end: who is nearest the ball most often
+    boost_s: 2.0          # s after the end where the other team pays the extra cost
+    cost: 0.5             # per frame, about one frame of full margin evidence (team_cost 0.5)
+  velocity:               # ball speed for fast_ball_speed (velocity.ball_velocity)
+    half_window_s: 0.12   # s on each side of the frame for the line fit
+    min_points: 4         # seen positions needed in that window
+    min_each_side: 1      # seen positions needed before AND after the frame
+
+output:
+  x_policy: none          # D14 still proposed: no X written yet

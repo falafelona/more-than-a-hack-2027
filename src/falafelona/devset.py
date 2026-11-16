@@ -57,7 +57,7 @@ from pathlib import Path
 
 import numpy as np
 
-from falafelona import deadball, possession, vendor
+from falafelona import deadball, learned_dead, possession, vendor
 from falafelona.ball import DataCleaner
 from falafelona.io import Event, Match, read_cache, write_cache
 from falafelona.pipeline import apply_x_policy
@@ -975,6 +975,52 @@ def spell_diagnosis(truth, labels, ball_missing, fps=FPS):
     return out
 
 
+TOUCH_TOLERANCE_S = 0.5   # a true switch counts as found when a touch of the new team is this near
+
+
+def evidence_check(match, truth, section):
+    """Counts that say whether the touch evidence points at the right team.
+
+    match: the CLEANED Match the decoder sees; section: cfg["possession"]. Empty when touch is
+    not set. Only counts leave here.
+      touch: touches found, touches given to one team, those whose team owns the ball in the
+        truth hold_s later (truth H or A only); true H <-> A switches with the ball seen, and
+        those with a touch of the new team within TOUCH_TOLERANCE_S; touches by the team that
+        did NOT own the ball TOUCH_TOLERANCE_S before (a claimed switch), and how many of those
+        the truth confirms hold_s later.
+    """
+    truth = np.asarray(truth)
+    out = {}
+    events = possession.touch_events(match, section)
+    if events is not None:
+        frames, teams = events
+        hold = max(1, int(np.floor(section["touch"]["hold_s"] * match.fps + 0.5)))
+        clear = teams >= 0
+        later = np.minimum(frames + hold - 1, len(truth) - 1)
+        owner = truth[later]
+        alive = np.isin(owner, ("H", "A"))
+        named = np.array(possession.STATES)[np.maximum(teams, 0)]
+        tol = int(np.floor(TOUCH_TOLERANCE_S * match.fps + 0.5))
+        switch = np.flatnonzero(np.isin(truth[1:], ("H", "A")) & np.isin(truth[:-1], ("H", "A"))
+                                & (truth[1:] != truth[:-1])) + 1
+        seen = ~np.isnan(match.ball_xy[switch, 0])
+        before = truth[np.maximum(frames - tol, 0)]
+        claim = clear & alive & np.isin(before, ("H", "A")) & (named != before)
+        found = 0
+        for t in switch[seen]:
+            near = (np.abs(frames - t) <= tol) & clear
+            found += bool((named[near] == truth[t]).any())
+        out.update({
+            "touches": len(frames), "touches_clear": int(clear.sum()),
+            "touches_scored": int((clear & alive).sum()),
+            "touches_right": int((clear & alive & (named == owner)).sum()),
+            "switches_seen": int(seen.sum()), "switches_touched": found,
+            "touches_claim": int(claim.sum()),
+            "touches_claim_right": int((claim & (named == owner)).sum()),
+        })
+    return out
+
+
 def _add_diagnoses(diagnoses):
     """Sum spell_diagnosis outputs over matches."""
     total = None
@@ -1010,7 +1056,7 @@ def _diagnosis_lines(name, d):
     causes = (f"    missed because we output: {missed_causes}; merged runs over a true stoppage "
               f"{d['merged_over_dead']}, over a true other-team possession "
               f"{d['merged_over_other_team']}")
-    return [
+    lines = [
         head,
         f"    missed by length (missed/truth): {by_len}",
         seen,
@@ -1018,6 +1064,18 @@ def _diagnosis_lines(name, d):
         f"    fake by length (fake/ours): {fake_len}",
         f"    fake, truth under it: {fake_causes}",
     ]
+    if "touches" in d:
+        lines.append(
+            f"    touch evidence: {d['touches']} touches, {d['touches_clear']} given to a team; "
+            f"right team (truth owner after hold_s): {share(d['touches_right'], d['touches_scored'])}"
+            f" of {d['touches_scored']}; true switches with the ball seen that have a touch of the "
+            f"new team within {TOUCH_TOLERANCE_S:g} s: "
+            f"{share(d['switches_touched'], d['switches_seen'])} of {d['switches_seen']}")
+        lines.append(
+            f"    touches by the team NOT owning the ball {TOUCH_TOLERANCE_S:g} s before (a claimed "
+            f"switch): {d['touches_claim']}, truth owner after hold_s is the toucher's team: "
+            f"{share(d['touches_claim_right'], d['touches_claim'])}")
+    return lines
 
 
 def oracle_dead_score(dead_score, truth, ball_missing, mode):
@@ -1090,6 +1148,7 @@ def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0, tags=Fals
         out["matches"][dev.match_id] = report
         prepared = {}  # stage key -> stages, for this match only
         for name, cfg in configs.items():
+            cfg = learned_dead.for_match(cfg, dev.match_id)   # leave-one-match-out model paths
             key = _stage_key(cfg)
             if key not in prepared:
                 prepared[key] = prepare_stages(match, cfg)
@@ -1098,8 +1157,10 @@ def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0, tags=Fals
             cleaned, track, dead_score = prepared[key]
             missing = np.isnan(cleaned.ball_xy[:, 0])
             if diagnose:
-                out["diagnosis"][name][dev.match_id] = spell_diagnosis(
-                    dev.truth, labels, missing, match.fps)
+                out["diagnosis"][name][dev.match_id] = {
+                    **spell_diagnosis(dev.truth, labels, missing, match.fps),
+                    **evidence_check(cleaned, dev.truth, cfg["possession"]),
+                }
             for mode in oracles:
                 oracle = oracle_dead_score(dead_score, dev.truth, missing, mode)
                 labels = predict_labels(match, cfg, (cleaned, track, oracle))

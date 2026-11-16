@@ -59,6 +59,10 @@ def label_report(labels, period, fps):
     for label in ("H", "A", "D", "X"):
         count = int(np.sum(labels == label))
         report[label] = (count, pct(count, n))
+    graded = np.asarray(period) > 0             # the frames the metric scores
+    for label in ("H", "A", "D", "X"):
+        count = int(np.sum((labels == label) & graded))
+        report[f"{label}, graded halves"] = (count, pct(count, int(graded.sum())))
     for name, lengths in (("all frames", possessions(labels)),
                           ("graded halves", possessions(labels, period))):
         mean = round(float(np.mean(lengths)) / fps, 1) if lengths else 0.0

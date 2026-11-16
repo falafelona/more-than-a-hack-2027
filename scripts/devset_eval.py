@@ -25,12 +25,15 @@
 #                  call could gain, and where. Not a config to submit.
 #   --diagnose     also count, per config, which true possessions are missed (by length, ball
 #                  seen or not, and what we output instead) and which of ours are fake
+#   --scores-json PATH  also write {config: {match: spellF1}} to PATH (per-match means only, for
+#                  scripts/touch_lomo.py). PATH must be outside the repo's data/cache/outputs.
 #   --summary      only shapes and label counts per match (checks that the files load)
 #   --inspect FILE print the element and attribute NAMES of one IDSSE XML file (no values)
 # Prints aggregates only: no frame numbers, no positions, and it writes no files except the
-# parsed-data cache under IDSSE_DATA_DIR/cache. The tests run it on made-up files.
+# parsed-data cache under IDSSE_DATA_DIR/cache (and --scores-json: one spellF1 per config and match). The tests run it on made-up files.
 
 import argparse
+import json
 from pathlib import Path
 
 import yaml
@@ -67,6 +70,8 @@ def main(argv=None):
                         "frames (repeatable): dead, dead_gaps, dead_seen")
     parser.add_argument("--diagnose", action="store_true",
                         help="count why possessions are missed or fake (aggregates only)")
+    parser.add_argument("--scores-json", default=None,
+                        help="also write {config: {match: spellF1}} here (aggregates only)")
     parser.add_argument("--summary", action="store_true", help="only shapes and counts")
     parser.add_argument("--inspect", default=None, help="print the XML structure of one file")
     parser.add_argument(
@@ -109,7 +114,15 @@ def main(argv=None):
         oracles=args.oracle, diagnose=args.diagnose,
     )
     print(devset.format_report(result, degrade=degrade))
+    if args.scores_json:
+        Path(args.scores_json).write_text(json.dumps(scores_by_match(result), indent=1) + "\n")
     return 0
+
+
+def scores_by_match(result):
+    """{config: {match: spellF1}}: the per-match means of the report, nothing per frame."""
+    return {name: {match: round(float(score["spellF1"]), 6) for match, score in per.items()}
+            for name, per in result["scores"].items()}
 
 
 if __name__ == "__main__":

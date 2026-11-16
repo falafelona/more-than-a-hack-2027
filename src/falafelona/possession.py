@@ -378,6 +378,119 @@ def restart_team_costs(codes: np.ndarray, dead_score: np.ndarray, threshold: flo
     return costs
 
 
+# --- touch evidence (A): a sharp change of the ball's velocity is a touch ----------------------
+#
+# Proximity evidence is smooth: a player near the ball counts for his team on every frame. A
+# short possession (an interception, a block, a one-touch pass) lasts too few frames for that to
+# pay for two switches, or it gets the timing wrong. A touch is sharp: where the ball's velocity
+# changes a lot (direction or speed), the nearest player touched it, at that frame. The evidence
+# goes on the frames from the touch on, and is NOT moved by evidence_lag (it is already timed).
+TOUCH_KEYS = ("offset_s", "min_change", "distance", "margin", "hold_s", "cost")
+TOUCH_TIE = 1e-9          # relative: changes this close to the window maximum are a tie
+
+
+def ball_touches(vxy: np.ndarray, offset: int, min_change: float) -> np.ndarray:
+    """int[k]: frames where the ball's velocity changes by at least min_change m/s.
+
+    change[t] = |v[t + offset] - v[t - offset]|; a touch is a frame where change is the largest
+    within +/- offset. A sharp turn gives a flat top a few frames wide (the two velocity windows
+    stop overlapping the turn at the same time): the touch is the middle of that flat top.
+    NaN velocity on either side: no touch.
+    """
+    vxy = np.asarray(vxy, dtype=np.float64)
+    n = len(vxy)
+    change = np.full(n, -np.inf)
+    if offset < 1 or n <= 2 * offset:
+        return np.array([], dtype=np.int64)
+    diff = np.hypot(*(vxy[2 * offset:] - vxy[:-2 * offset]).T)
+    change[offset:n - offset] = np.where(np.isfinite(diff), diff, -np.inf)
+    padded = np.concatenate((np.full(offset, -np.inf), change, np.full(offset, -np.inf)))
+    window_max = np.lib.stride_tricks.sliding_window_view(padded, 2 * offset + 1).max(axis=1)
+    peak = (change >= min_change) & (change >= window_max - TOUCH_TIE * np.abs(window_max))
+    edges = np.diff(np.concatenate(([0], peak.astype(np.int8), [0])))
+    starts, stops = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+    return (starts + stops) // 2                            # middle of each flat top
+
+
+def touch_teams(touches: np.ndarray, d_home: np.ndarray, d_away: np.ndarray,
+                distance: float, margin: float) -> np.ndarray:
+    """int[k] H_STATE / A_STATE / -1 for each touch: the team that touched it, if clear.
+
+    The nearest player must be within `distance` of the ball, and the nearest of the other team
+    at least `margin` further away; otherwise (a duel, nobody close) -1.
+    """
+    touches = np.asarray(touches, dtype=np.int64)
+    dh, da = np.asarray(d_home)[touches], np.asarray(d_away)[touches]
+    team = np.full(len(touches), -1)
+    team[(dh <= distance) & (da >= dh + margin)] = H_STATE
+    team[(da <= distance) & (dh >= da + margin)] = A_STATE
+    return team
+
+
+def touch_team_costs(n: int, touches: np.ndarray, teams: np.ndarray, hold: int,
+                     cost: float) -> np.ndarray:
+    """float[n, 2]: `cost` on the OTHER team's state for `hold` frames from each touch on.
+
+    Overlapping holds do not add up (the larger, i.e. the same, cost stays); a frame held for
+    both teams gets the cost on both, which is no evidence either way.
+    """
+    costs = np.zeros((n, 2))
+    for frame, team in zip(np.asarray(touches), np.asarray(teams), strict=True):
+        if team < 0:
+            continue
+        other = A_STATE if team == H_STATE else H_STATE
+        costs[frame:frame + hold, other] = cost
+    return costs
+
+
+def _positive(block, key, name):
+    value = block.get(key)
+    if (isinstance(value, bool) or not isinstance(value, int | float) or not np.isfinite(value)
+            or value <= 0):
+        raise ValueError(f"possession.{name}.{key} must be a number > 0, got {value!r}")
+    return float(value)
+
+
+def _block(section, name, keys):
+    """The checked numbers of a possession sub-block, or None when it is not set (off)."""
+    if name not in section:
+        return None
+    block = section[name]
+    if not isinstance(block, dict):
+        raise TypeError(f"possession.{name} must be a mapping ({', '.join(keys)})")
+    return {key: _positive(block, key, name) for key in keys}
+
+
+def touch_events(match, section):
+    """(frames int[k], teams int[k]) of the touches, or None when possession.touch is off.
+
+    Teams are H_STATE / A_STATE / -1 (unclear). Uses the `velocity:` block for the ball.
+    """
+    values = _block(section, "touch", TOUCH_KEYS)
+    if values is None:
+        return None
+    if "velocity" not in section:
+        raise ValueError("possession.touch needs a possession.velocity block "
+                         "(half_window_s, min_points, min_each_side)")
+    offset = int(np.floor(values["offset_s"] * match.fps + 0.5))
+    if offset < 1:
+        raise ValueError("possession.touch.offset_s is shorter than one frame")
+    vxy, _ = velocity.ball_velocity(match.ball_xy, match.period, match.fps, section["velocity"])
+    touches = ball_touches(vxy, offset, values["min_change"])
+    d_home, d_away = team_distances(match.players_xy, match.ball_xy, match.slot_team)
+    return touches, touch_teams(touches, d_home, d_away, values["distance"], values["margin"])
+
+
+def _touch(match, section):
+    """float[n, 2] touch costs, or None when possession.touch is not set (off)."""
+    events = touch_events(match, section)
+    if events is None:
+        return None
+    block = section["touch"]
+    hold = max(1, int(np.floor(block["hold_s"] * match.fps + 0.5)))
+    return touch_team_costs(match.n_frames, *events, hold, float(block["cost"]))
+
+
 RESTART_KEYS = ("threshold", "min_dead_s", "look_s", "boost_s", "cost")
 
 # Every setting the `possession:` section may hold ("" = the section itself, else a nested
@@ -388,8 +501,9 @@ CONFIG_KEYS = {
     "": ("method", "window", "dead_threshold", "dead_margin", "switch_cost", "team_evidence",
          "team_cost", "margin_scale", "near_distance", "dead_weight", "to_dead_cost",
          "from_dead_cost", "evidence_lag", "fast_ball_speed", "velocity_match", "velocity",
-         "restart", "switch_placement"),
+         "restart", "switch_placement", "touch"),
     "velocity": velocity.SETTING_KEYS,
+    "touch": TOUCH_KEYS,
     "velocity_match": ("max_diff", "control_distance", "cost"),
     "restart": RESTART_KEYS,
 }
@@ -534,6 +648,8 @@ def _hmm(match, dead_score, section):
         nearest player moves with the ball (default: not set = off). Needs `velocity:` too.
     switch_placement: 0 to 1; where an H <-> A switch goes inside a stretch with no evidence
         (default: not set = off = the earliest frame, as Viterbi leaves it). See place_switches.
+    touch: {offset_s, min_change, distance, margin, hold_s, cost}; evidence for the team that
+        touched the ball where its velocity changes sharply (default: off). Needs `velocity:`.
     """
     evidence = section.get("team_evidence", "nearest")
     if evidence not in TEAM_EVIDENCE:
@@ -567,6 +683,9 @@ def _hmm(match, dead_score, section):
     restart = _restart(match, dead_score, section)
     if restart is not None:
         team = team + restart
+    touch = _touch(match, section)            # after the lag: a touch is already timed
+    if touch is not None:
+        team = team + touch
     costs = add_dead_costs(team, dead_score, dead_weight)
     path = viterbi(costs, table)
     placement = _placement(section)

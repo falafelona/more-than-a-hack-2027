@@ -8,7 +8,9 @@ from falafelona.config import load_config
 from falafelona.vendor import REPO_ROOT
 
 EXP = REPO_ROOT / "configs" / "exp"
-FINAL = load_config(REPO_ROOT / "configs" / "final.yaml")
+# final.yaml before the dead-score blend (= configs/exp/poss-touch-best.yaml)
+FINAL = load_config(REPO_ROOT / "configs" / "exp" / "poss-touch-best.yaml")
+FINAL["possession"].pop("touch", None)      # added after this check (feat/poss-touch-evidence)
 BASE = load_config(EXP / "best-restart.yaml")
 STILL_BALL_KEYS = ("still_ball_speed", "still_ball_seconds", "spot_line_m", "spot_centre_m",
                    "goal_area_depth_m", "goal_area_half_width_m", "ball_speed")
