@@ -14,9 +14,16 @@ def test_shipped_configs_load():
 
 
 def test_final_is_the_best_dev_set_config():
-    """final.yaml carries the same settings as configs/exp/best-still-ball-restart.yaml."""
+    """final.yaml carries the same settings as configs/exp/poss-place-late.yaml."""
     assert load_config(CONFIGS / "final.yaml") == load_config(
-        CONFIGS / "exp" / "best-still-ball-restart.yaml")
+        CONFIGS / "exp" / "poss-place-late.yaml")
+
+
+def test_final_is_still_ball_restart_plus_switch_placement():
+    """The step before: best-still-ball-restart.yaml, plus switch_placement 0.75 and nothing else."""
+    final = load_config(CONFIGS / "final.yaml")
+    assert final["possession"].pop("switch_placement") == 0.75
+    assert final == load_config(CONFIGS / "exp" / "best-still-ball-restart.yaml")
 
 
 def test_baseline_matches_official_smooth50():

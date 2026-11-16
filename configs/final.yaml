@@ -1,11 +1,14 @@
 # The configuration we submit. Organisers' deadline: Tue 17 Nov 23:59 CET. The team locks it on
 # Sun 15 or Mon 16 Nov (tag v1.0-freeze).
 # Changes only via a PR with a row in experiments/RESULTS.md.
-# Now: a copy of configs/exp/best-still-ball-restart.yaml: the #45 config (graded dead score with
+# Now: a copy of configs/exp/poss-place-late.yaml: the #45 config (graded dead score with
 # gap_chance and the restart tags, H / A / D HMM with the evidence lag and the fast-ball rule) plus
 # the still-ball clue in the dead score and the restart-taker evidence. Dev set vs the #45 config,
 # better on 7/7 matches in every run: seed 0 +0.080 / +0.042 (random / stoppage cuts), +0.060 with
 # tags; seed 1 +0.080 / +0.044.
+# Then + switch_placement 0.75 (configs/exp/poss-place-late.yaml, #49): vs best-still-ball-restart.yaml,
+# better on 7/7 matches in every run: +0.022 / +0.027 (seed 0 random / stoppage), +0.025 / +0.026
+# (seed 1); the same +0.023 / +0.027 with the still-ball clue off.
 seed: 0
 
 ball:
@@ -70,6 +73,7 @@ possession:
   from_dead_cost: 6.0     # cost of leaving D for H or A
   evidence_lag: 12        # frames (0.5 s): H / A evidence moved later; the receiver nears the ball before touching it
   fast_ball_speed: 12     # m/s: no H / A evidence while the ball moves faster (pass or shot)
+  switch_placement: 0.75  # NEW: H / A switches placed 75% into their no-evidence stretch (Viterbi puts them at the earliest frame)
   restart:                # NEW: the team near the ball where a dead spell ends takes the restart
     threshold: 0.5        # dead score at or above this is dead
     min_dead_s: 3.0       # s: only real stoppages, not a short dip in the dead score

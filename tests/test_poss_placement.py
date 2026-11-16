@@ -163,6 +163,7 @@ def long_ball_match(pass_speed=20.0):
 
 def decode(match, placement=None):
     section = copy.deepcopy(FINAL["possession"])
+    section.pop("switch_placement", None)                     # final.yaml has it on: start without
     if placement is not None:
         section["switch_placement"] = placement
     labels = possession.predict(match, np.zeros(len(match.ball_xy)), {"possession": section})
@@ -219,11 +220,13 @@ def test_the_label_counts_move_by_the_stretch_only():
 
 
 def test_no_switch_placement_means_the_rule_is_off():
-    assert possession._placement(FINAL["possession"]) is None
+    section = {k: v for k, v in FINAL["possession"].items() if k != "switch_placement"}
+    assert possession._placement(section) is None
 
 
-def test_final_yaml_does_not_use_switch_placement():
-    assert "switch_placement" not in FINAL["possession"]
+def test_final_yaml_uses_switch_placement_075():
+    assert FINAL["possession"]["switch_placement"] == 0.75
+    assert possession._placement(FINAL["possession"]) == 0.75
 
 
 @pytest.mark.parametrize("value", [0, 0.0, 0.5, 1, 1.0])
@@ -243,10 +246,16 @@ def test_bad_placements_are_refused(value):
 
 @pytest.mark.parametrize("name, value", [("poss-place-half", 0.5), ("poss-place-late", 0.75),
                                          ("poss-place-end", 1.0)])
-def test_the_placement_configs_are_final_plus_the_placement(name, value):
+def test_the_placement_configs_are_final_with_another_placement(name, value):
     cfg = load_config(REPO_ROOT / "configs" / "exp" / f"{name}.yaml")
     assert cfg["possession"].pop("switch_placement") == value
-    assert cfg == FINAL
+    final = copy.deepcopy(FINAL)
+    final["possession"].pop("switch_placement")
+    assert cfg == final
+
+
+def test_poss_place_late_is_final_yaml():
+    assert load_config(REPO_ROOT / "configs" / "exp" / "poss-place-late.yaml") == FINAL
 
 
 @pytest.mark.parametrize("name", ["poss-place-half", "poss-place-late", "poss-place-end"])
