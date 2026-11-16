@@ -10,9 +10,12 @@ Each stage is one module, so most PRs touch one file plus its tests.
 | Evidence and decoder | `possession.py` | cleaned `Match` (ball already replaced by the cleaned track), score | `H`/`A`/`D` per frame |
 | Final mask and write | `pipeline.py` | Labels | `outputs/Falafelona.csv` |
 | Motion features | `velocity.py` | positions, `period`, `fps`, config block | ball velocity and player speed per frame (m/s) |
+| Learned dead-ball score | `learned_dead.py` | cleaned `Match`, a fitted model file in `models/` | chance per frame that the ball is dead: one clue of the dead-ball score (D24) |
 | Dev set | `devset.py` | `$IDSSE_DATA_DIR` | `Match` plus truth, scores per config |
 
 `vendor.py` gives access to the official code, and `config.py` loads `configs/*.yaml`.
+
+`config.py` also refuses any setting name that no stage reads, so a misspelt key cannot switch a feature off silently.
 
 `pipeline.py` runs `ball.DataCleaner` first and passes the cleaned `Match` on: `ball_xy` in it is already the cleaned track, so `possession.py` does not take the `BallTrack` separately.
 
@@ -59,6 +62,29 @@ load_idsse(match_id) -> DevMatch(match_id, match: Match, truth: str[n] in {H, A,
 degrade_ball(match, section, seed) -> (Match, report)   # ball gaps like ours, fixed seed
 run_devset(configs, dev_cfg, matches) -> spellF1 / macroF1 per config and match
 ```
+
+## What `configs/final.yaml` runs (tag `v1.2`)
+
+1. **Ball:** `interpolate`: straight-line fill of gaps up to 0.5 s.
+2. **Dead-ball score:** `combined`: `before_kickoff` 1.0, `out_of_bounds` 1.0, `before_restart` 0.6, `still_ball_at_spot` 0.6, and the blend `gap_chance` × 0.3 + `learned` × 0.7 (D24). Capped at 1.
+3. **Possession:** `hmm`: a Viterbi decoder over H / A / D with distance-margin evidence moved 0.5 s later, the fast-ball rule, restart-taker evidence (D20), switch placement 0.75 (D22) and touch evidence (D23).
+4. **Output:** one label per frame, no `X` (D14).
+
+The technical document, [Falafelona.md](Falafelona.md), explains each part and why.
+
+## Scripts
+
+| Script | What it does | Reads |
+|---|---|---|
+| `scripts/devset_eval.py` | scores configs on the dev set with the official metric; `--oracle` and `--diagnose` explain where the score is lost | IDSSE (humans only) |
+| `scripts/fit_deadball.py` | fits the learned dead-ball models and writes them to `models/` | IDSSE (humans only) |
+| `scripts/touch_lomo.py` | leave-one-match-out check of a config picked from a sweep (D25) | the per-match scores written by `devset_eval.py --scores-json` |
+| `scripts/label_free_check.py` | builds the file from a config and prints counts only (label shares, possessions, kickoff, tags, sha256) | our match (humans only) |
+| `scripts/compare_submissions.py` | compares two possession files, aggregates only | two CSV files |
+| `scripts/ball_eda.py`, `scripts/dead_eda.py` | aggregate statistics of the ball gaps and of the dead-ball clues | our match (humans only) |
+| `scripts/metric_study.py` | how spellF1 reacts to flicker and late switches, on synthetic labels | nothing |
+| `scripts/bootstrap_eval.py` | checks a submission file: the public five-minute pipeline check with a bootstrap interval (never used to choose, D9) and label-free counts | our outputs (humans only) |
+| `scripts/check_no_data.py` | refuses data-shaped files in the repo; runs in the tests and the git hooks | the repo |
 
 ## Baseline path
 
