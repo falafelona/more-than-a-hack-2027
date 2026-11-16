@@ -388,7 +388,7 @@ CONFIG_KEYS = {
     "": ("method", "window", "dead_threshold", "dead_margin", "switch_cost", "team_evidence",
          "team_cost", "margin_scale", "near_distance", "dead_weight", "to_dead_cost",
          "from_dead_cost", "evidence_lag", "fast_ball_speed", "velocity_match", "velocity",
-         "restart"),
+         "restart", "switch_placement"),
     "velocity": velocity.SETTING_KEYS,
     "velocity_match": ("max_diff", "control_distance", "cost"),
     "restart": RESTART_KEYS,
