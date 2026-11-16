@@ -5,7 +5,7 @@ Athletic Club saying who has the ball (`H` Barcelona, `A` Athletic, `D` dead bal
 
 | | |
 |---|---|
-| Team | Falafelona: Chikhani, Tala, Dudu, Laila, Abdallah |
+| Team | Falafelona: Mohamed Chikhani, Tala Fakhreddine, Mohamed Khaled, Laila Mansour, Abdallah Kassem |
 | Repository | https://github.com/falafelona/more-than-a-hack-2027 |
 | Submitted version | tag `v1.2` (commit `b40b4b8`), built from `configs/final.yaml` |
 | Possession file | `Falafelona.csv`, 199,319 rows, SHA-256 `ea403a67c0ce2ea67b00decb50a766781c0c1bf51762f56f7d4926263b0e43a2` |
