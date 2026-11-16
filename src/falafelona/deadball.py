@@ -235,6 +235,10 @@ class DeadBall:
         kickoffs = select_tags(self.data.tags, code="set pieces", type="kick off (start)")
         second_half = [tag for tag in kickoffs if tag.half == 2]
         if not second_half:                            # no kickoff tag: no evidence either way
+            if self.data.tags:                         # tags exist, so the kickoff one is missing
+                warnings.warn("Smart Tagging has no second-half Kick Off (Start) tag, so "
+                              "before_kickoff marks nothing dead; scripts/label_free_check.py "
+                              "shows how many frames this leaves", RuntimeWarning, stacklevel=2)
             return np.zeros(self.data.n_frames)
         kickoff = second_half[0].start                 # the frame the second half kicks off
         frames = np.arange(self.data.n_frames)         # 0, 1, 2, ... one number per frame
