@@ -3,7 +3,7 @@
 Team **Falafelona**'s entry for [More Than a Hack 2027](https://landing.mobileworldcapital.com/more-than-a-hack-2027)
 (Metrica Sports × FC Barcelona / Barça Innovation Hub × Mobile World Capital Barcelona).
 
-**Team:** Chikhani · Tala · Dudu · Laila · Abdallah
+**Team:** Mohamed Chikhani · Tala Fakhreddine · Mohamed Khaled · Laila Mansour · Abdallah Kassem
 
 **Status:** submitted. The submission is tag [`v1.2`](https://github.com/falafelona/more-than-a-hack-2027/tree/v1.2), built from `configs/final.yaml`: 199,319 rows, official validator OK, SHA-256 `ea403a67c0ce2ea67b00decb50a766781c0c1bf51762f56f7d4926263b0e43a2`. Every setting was chosen on the IDSSE dev set, never on this match. On that dev set it scores spellF1 0.455 to 0.519 across our four runs, against 0.201 to 0.269 for the baseline configuration. The organisers' baseline on this match: spellF1 **0.2433**.
 

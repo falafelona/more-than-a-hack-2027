@@ -90,6 +90,20 @@ and the total is capped at 1.
 | `gap_chance` | inside a ball gap: one hand-built chance for the whole gap, from its length, whether the ball was last seen or reappears near a line or the centre spot, and whether the players stand still | 0.3 × the chance |
 | `learned` | a per-frame chance from a small logistic model fitted on IDSSE (section 1.3) | 0.7 × the chance |
 
+Why the clues are set this way:
+
+- **Out of bounds uses a 1 m margin** because tracking is noisy near the lines, and a ball on
+  the line is still in play.
+- **Restart windows differ by type** because a throw-in is taken much faster than a free kick
+  or a kickoff after a goal (which includes the celebration). A window that is too long
+  reaches back into live play before the ball went out, so each type gets its own length.
+- **The team on a tag is not used for dead ball**, so throw-ins tagged without a team still
+  count: a dead ball is `D` whoever restarts it.
+- **The restart-tag clue weighs 0.6, not 1.0.** That is enough on its own to make a frame lean
+  dead, but Smart Tagging is automatic and unreviewed (DATA.md), so one wrong tag adds
+  evidence the decoder weighs against everything else instead of overriding it. The kickoff
+  clue keeps 1.0: the second half cannot have started before its kickoff.
+
 Tried and not used: `ball_missing` alone (the official baseline: every gap is dead) and a flat
 "players standing still" clue. Player and ball speeds are computed from positions with a short
 line fit, not read from the tracking file's speed field.
