@@ -3,9 +3,11 @@
 Team **Falafelona**'s entry for [More Than a Hack 2027](https://landing.mobileworldcapital.com/more-than-a-hack-2027)
 (Metrica Sports × FC Barcelona / Barça Innovation Hub × Mobile World Capital Barcelona).
 
-**Team:** Chikhani · Tala · Dudu · Laila · Abdallah
+**Team:** Mohamed Chikhani · Tala Fakhreddine · Mohamed Khaled · Laila Mansour · Abdallah Kassem
 
-**Status:** pipeline in progress. Baseline to beat: spellF1 **0.2433**.
+**Status:** submitted. The submission is tag `v1.3`, built from `configs/final.yaml`: 199,319 rows, official validator OK, SHA-256 `f8241f4f57a81a1076667a41929b64275eca9bd3ae0c8ebceb33bbee9275a35e`. Every setting was chosen on the IDSSE dev set, never on this match. On the original dev set it scores spellF1 0.518 to 0.577 across our four runs, against 0.455 to 0.519 for our first submission (v1.2) and 0.201 to 0.269 for the baseline configuration. The organisers' baseline on this match: spellF1 **0.2433**.
+
+**The technical document is [docs/Falafelona.md](docs/Falafelona.md).**
 
 ## The task
 
@@ -31,35 +33,47 @@ The tracking is automatic and uncorrected, has no player identities, and the bal
 ## How it works
 
 ```
-tracking data
+tracking data + Smart Tagging
   → clean the ball track            ball.py
-  → dead-ball score                 deadball.py
-  → per-frame team evidence         possession.py
+  → dead-ball score                 deadball.py     (one clue is a fitted model: learned_dead.py)
+  → per-frame team evidence         possession.py   (distance margin, touches, restarts; velocity.py)
+                                    learned_touch.py, learned_team.py  (touch team; team inside ball gaps)
   → H/A/D decoder                   possession.py
+  → clean-up                        possession.py   (switch timing, spells under 1 s merged)
   → final labels                    pipeline.py
   → Falafelona.csv
 ```
 
 **The decoder is the centre of the system.** The features say what is likely on each frame, and the decoder chooses the best whole sequence. Every switch has a cost, so brief wrong evidence cannot create a false possession, and flicker disappears.
 
-The decoder uses three states because every graded frame is `H`, `A` or `D`. Where we write `X` is still being decided (D14).
+The decoder uses three states because every graded frame is `H`, `A` or `D`. We write no `X` anywhere: it cannot raise spellF1, and on a graded frame it always counts as a miss for macroF1 (D14).
 
-See [docs/architecture.md](docs/architecture.md) for the stages and [docs/decisions.md](docs/decisions.md) for why.
+**How settings are chosen.** We have no answers for this match and may not tune on it, so every setting is chosen on the seven open IDSSE matches (dev set), with the ball cut to look like ours. A change is kept only if it is better in all four dev-set runs (two kinds of simulated gaps, two seeds), on at least 6 of the 7 matches in each (D17, D18). A mean gain of at least +0.04 spellF1 per run passes outright; a smaller one goes in only by an explicit team decision, recorded in RESULTS.md. Most of the later steps were of that kind (D22, D24, D26 to D33). Every experiment, kept or dropped, is a row in [experiments/RESULTS.md](experiments/RESULTS.md).
+
+**Training data.** The only labelled data is the open IDSSE dataset (Bassek et al., *Scientific Data* 12, 195, 2025), approved by the organisers. Its labels come with the dataset; we labelled nothing by hand, on this match or any other. It is used to choose settings and to fit three small logistic models (dead ball, the team of each touch, the team inside ball gaps), whose fitted numbers are in [`models/`](models/README.md).
+
+See [docs/architecture.md](docs/architecture.md) for the stages, [docs/decisions.md](docs/decisions.md) for why, and [docs/Falafelona.md](docs/Falafelona.md) for the technical document.
 
 ## Reproduce our submission
 
-> Commands are placeholders until the pipeline is complete.
+Needs Python 3.12, `make`, `git`, and the organisers' data bundle in a folder **outside** this repo.
 
 ```bash
 git clone --recurse-submodules https://github.com/falafelona/more-than-a-hack-2027
 cd more-than-a-hack-2027
-make setup
-export MTAH_DATA_DIR=/path/to/mtah-data
-make submission
-make validate
+git checkout v1.3                         # the submitted version
+make setup                                # .venv and pinned dependencies
+export MTAH_DATA_DIR=/path/to/mtah-data   # the organisers' data bundle, outside this repo
+make submission                           # writes outputs/Falafelona.csv from configs/final.yaml
+make validate                             # the official validate_submission.py
+shasum -a 256 outputs/Falafelona.csv
 ```
 
-Expected: 199,319 rows · SHA-256 `<fill in at freeze>` · runtime `<N> min` on `<machine>`.
+Expected: `outputs/Falafelona.csv`, 199,319 rows, validator OK, SHA-256 `f8241f4f57a81a1076667a41929b64275eca9bd3ae0c8ebceb33bbee9275a35e`.
+
+The run is deterministic and needs no training: the fitted models are small JSON files in `models/`. We built the file twice and got the identical SHA-256.
+
+`make check` runs the linter and the tests (synthetic data only, no match data needed). To repeat the dev-set comparisons, see [experiments/README.md](experiments/README.md).
 
 ## Rules we work under
 
@@ -74,4 +88,4 @@ Working on this repo? Read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 
 ## Licence
 
-Code: _TBD_. The match data is © its owners, licensed for this competition only, and not included here.
+Code and documentation: MIT, see [LICENSE](LICENSE). This covers our own work only. The match data is © its owners, licensed for this competition only, and not included here. `vendor/challenge/` is the organisers' code under its own licence. The model files in `models/` were fitted on the IDSSE dataset (CC BY 4.0, cited in the technical document).
