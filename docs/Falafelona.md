@@ -7,8 +7,8 @@ Athletic Club saying who has the ball (`H` Barcelona, `A` Athletic, `D` dead bal
 |---|---|
 | Team | Falafelona: Mohamed Chikhani, Tala Fakhreddine, Mohamed Khaled, Laila Mansour, Abdallah Kassem |
 | Repository | https://github.com/falafelona/more-than-a-hack-2027 |
-| Submitted version | tag `v1.2` (commit `b40b4b8`), built from `configs/final.yaml` |
-| Possession file | `Falafelona.csv`, 199,319 rows, SHA-256 `ea403a67c0ce2ea67b00decb50a766781c0c1bf51762f56f7d4926263b0e43a2` |
+| Submitted version | tag `[FILL: tag]` (commit `[FILL: commit]`), built from `configs/final.yaml` |
+| Possession file | `Falafelona.csv`, 199,319 rows, SHA-256 `[FILL: sha256]` |
 
 All numbers in this document are aggregates. It contains no match data and no frame-level values.
 
@@ -23,16 +23,19 @@ frame accuracy (macroF1) stays at 0.997. Timing matters too, but less: the organ
 second. So the main job is not a better guess on each frame; it is **producing few, clean
 possessions, switched at the right moment** (decision D13).
 
-**The pipeline.** Three stages, each one module, all settings in `configs/final.yaml`.
+**The pipeline.** Four stages, all settings in `configs/final.yaml`.
 
 ```
 tracking data + Smart Tagging
-  → clean the ball track              ball.py         fill short gaps
-  → dead-ball score per frame         deadball.py     0 = alive ... 1 = dead
-                                      learned_dead.py   (one clue is a small fitted model)
-  → team evidence per frame           possession.py   distance margin, touches, restarts
-  → H / A / D decoder (HMM, Viterbi)  possession.py   chooses the best whole sequence
-  → Falafelona.csv                    pipeline.py     199,319 rows, frame,label
+  → clean the ball track              ball.py           fill short gaps
+  → dead-ball score per frame         deadball.py       0 = alive ... 1 = dead
+                                      learned_dead.py   (one clue is a fitted model)
+  → team evidence per frame           possession.py     distance margin, touches, restarts
+                                      learned_touch.py  (which team each touch belongs to)
+                                      learned_team.py   (who has the ball inside a ball gap)
+  → H / A / D decoder (HMM, Viterbi)  possession.py     chooses the best whole sequence
+  → clean-up                          possession.py     switch timing, very short spells merged
+  → Falafelona.csv                    pipeline.py       199,319 rows, frame,label
 ```
 
 **Why a decoder, rather than smoothing.** The official baseline gives each frame to the team of
@@ -47,18 +50,26 @@ post-match).
 A wrongly placed `D` splits a possession exactly like a wrong team does, so team and dead-ball
 decisions are made together in one model (D13).
 
+**Why learned models, and only small ones.** The hand-built evidence works where the ball is
+seen. Inside ball gaps (41% of our graded frames) it has nothing to say, and our diagnosis runs
+showed that this is where most of the score is lost (section 5). So three parts of the pipeline
+are small logistic models fitted on other matches (section 3): the dead-ball chance, the team of
+each touch, and who has the ball inside a gap. They are ridge logistic regressions fitted with
+plain numpy (no extra dependency), each a small JSON file in `models/` that anyone can read.
+A gradient-boosted model on the same inputs did no better (section 5).
+
 **How we chose settings.** We have no answers for our own match, and tuning on it is not allowed.
 Every setting is chosen on other matches (the IDSSE dev set, section 3), never on this match
-(D9, D15). Every candidate was scored against the current configuration in four runs: two kinds
+(D9, D15). Every candidate is scored against the current configuration in four runs: two kinds
 of simulated ball gaps times two random seeds. What we did with the result (D18):
 
 - A change went in only if it was better in all four runs, on at least 6 of the 7 dev matches
-  in each. All five steps we kept meet this.
+  in each.
 - A mean gain of at least +0.04 spellF1 per run passed outright; below that, a single run is
-  inside the noise. Three of the five steps cleared +0.04 in every run.
-- The other two went in by an explicit team decision, recorded in `experiments/RESULTS.md`:
-  switch placement (+0.022 to +0.027, but better on all 7 matches in all four runs) and the
-  dead-score blend (an exception, explained in section 1.3).
+  inside the noise.
+- A smaller gain went in only by an explicit team decision, recorded in
+  `experiments/RESULTS.md`. Most of our later steps were of this kind: each gained less than
+  +0.04, but all four runs agreed (section 5 lists them).
 
 ### 1.1 Ball track
 
@@ -70,6 +81,7 @@ The ball is missing on 40.7% of graded frames. Cleaners are chosen in the `ball:
 | `reject` | removes false detections: impossible jumps and a ball far from every player | available, not in the final configuration |
 | `interpolate` | fills gaps up to 0.5 s with a straight line, unless the ball could not have crossed the gap at 40 m/s | **used** |
 | Kalman smoother | fills and smooths gaps up to 0.5 s or 1.9 s | dropped: +0.000 to +0.001, same as `interpolate` |
+| Longer `interpolate` | fills gaps up to 1.0, 1.5 or 2.0 s | dropped: +0.000 |
 
 Cleaning the ball does not move the score, and the ball EDA says why: 99% of our missing ball
 frames are in gaps longer than 5 s (median gap 10.7 s), and only about 0.1% are in gaps short
@@ -88,7 +100,7 @@ and the total is capped at 1.
 | `before_restart` | the seconds before a tagged restart (throw-in 8 s, corner 15 s, goal kick 20 s, free kick 25 s, kickoff after a goal 45 s) | 0.6 |
 | `still_ball_at_spot` | a seen ball slower than 0.5 m/s for 2 s at a restart spot (near a line, in the goal area, at the centre spot) | 0.6 |
 | `gap_chance` | inside a ball gap: one hand-built chance for the whole gap, from its length, whether the ball was last seen or reappears near a line or the centre spot, and whether the players stand still | 0.3 × the chance |
-| `learned` | a per-frame chance from a small logistic model fitted on IDSSE (section 1.3) | 0.7 × the chance |
+| `learned` | a per-frame chance from the learned dead-ball model (section 1.3) | 0.7 × the chance |
 
 Why the clues are set this way:
 
@@ -122,68 +134,89 @@ line fit, not read from the tracking file's speed field.
 So a ball gap is a hint of a stoppage but a bad rule: calling every gap `D`, as the baseline
 does, would split many possessions. This is why dead ball is a graded score fed to the decoder.
 
-### 1.3 The learned dead-ball score and the blend
+### 1.3 The three learned models
 
-**Why.** The hand-built `gap_chance` gives each ball gap one value for its whole length, so a
-20 s gap comes out all dead or all alive even when it holds some of each, and its weights were
-set by hand.
+All three are ridge logistic regressions. None of their inputs uses tags, the truth or anything
+from the public five minutes. The pipeline only applies them; section 3 says how they were
+fitted.
 
-**What.** `learned_dead.py` gives every frame its own chance, from two small logistic
-regressions (ridge, fitted with plain numpy; no extra dependency):
+**Dead ball (`learned_dead.py`, version 3, `models/deadball_stoppage3_all.json`).** The
+hand-built `gap_chance` gives each ball gap one value for its whole length, so a 20 s gap comes
+out all dead or all alive even when it holds some of each. The learned model gives every frame
+its own chance, from two parts:
 
-- **inside a ball gap** (12 inputs): the gap's length; whether the ball was last seen, or
-  comes back, near a line or at the centre spot, and how fast it moved at the gap's edges; the
-  players' speed around this frame (windows of 1, 4 and 12 s) and the share standing still;
+- **inside a ball gap** (20 inputs): the gap's length; whether the ball was last seen, or comes
+  back, near a line or at the centre spot, and how fast it moved at the gap's edges; the
+  players' speed around this frame (windows of 1, 4 and 12 s) and the share standing still.
+  Version 3 adds 8 inputs on timing and the crowd: time since the gap started and until it
+  ends, a line clue that fades with time, the trend of the players' speed, how crowded it was
+  where the ball left and where it returns, and how spread out the players are;
 - **where the ball is seen** (13 inputs): ball speed, ball standing still (and at a restart
   spot), distance to a line, out of bounds, distance to the centre spot, how long it has been
   slow, and the same player-speed windows.
 
-No input uses tags or the truth. The fitted numbers are a 2 KB JSON file of a few dozen
-coefficients, committed in `models/`, so the organisers can inspect exactly what runs. The
-pipeline only applies them; section 3 says what they were trained on.
+Inside a gap the final dead score is `0.3 × gap_chance + 0.7 × learned`; where the ball is
+seen, the learned chance (× 0.7) adds to the other clues. The learned score alone gained under
+random gaps only; the blend kept that gain and fixed the weak side under stoppage gaps
+(section 5). It went in by exception to our +0.04 rule (D24).
 
-**The blend.** On its own the learned score failed our rule: it gained under random gaps only
-(+0.045 / +0.008 / +0.038 / +0.004 on top of touch evidence). Blending it with the hand-built
-score fixed the weak side: inside a gap the final score is `0.3 × gap_chance + 0.7 × learned`.
-Where the ball is seen, the learned score (× 0.7) adds to the other clues. Of three weights
-tried (0.3, 0.5, 0.7), 0.7 was best, and the model trained on stoppage gaps only was the
-steadiest across runs.
+**Touch team (`learned_touch.py`, `models/touch_all.json`).** A *touch* is a sharp change of
+the ball's velocity: at least 3 m/s between 0.12 s before and 0.12 s after a frame. A simple
+rule gives the touch to the nearest player's team, if he is within 4 m and the other team's
+nearest player is at least 0.1 m further; it names a team for 91% of the touches and is right on
+87.8% of those. The model decides it for every
+touch, from 20 inputs: the distance margin between the two teams before, at and after the touch
+and 1 s later (the receiver), how many players of each team are close, which team's nearest
+player moves *with* the ball afterwards, the ball's direction along each team's attack, the
+rule's answer for this touch and its neighbours, ball speeds, and the time to the neighbouring
+touches. It is right on 90.2% of all touches, on matches it was not fitted on. For 0.8 s after
+a touch, the team the model thinks does *not* have the ball pays `2.0 × |log-odds|` per frame,
+so a confident call weighs more than an unsure one.
 
-**The exception.** Against the configuration before it, the blend gains +0.040 / +0.023 /
-+0.037 / +0.022 (seed 0 random / stoppage, seed 1 random / stoppage) and is better on 27 of 28
-match-runs; its worst single match is −0.005. That is below our +0.04 bar under stoppage gaps
-(and, at +0.037, just under it in one random-gap run). We took an exception (D24) for one
-reason: under stoppage gaps even a *perfect* dead-ball call inside gaps is worth only +0.041
-(oracle run), so a change to the gap score has almost no room to reach +0.04 there.
-We state the cost of this plainly in section 6: the blend was chosen from about 8 variants on
-the same 7 matches, so part of its lead may be luck.
+**Team inside ball gaps (`learned_team.py`, version 5, `models/team_smooth5g_all.json`).**
+Inside a gap the distance evidence is empty, so the decoder could only hold the last owner. The
+model gives the chance that home has the ball on each gap frame, from 21 inputs: where the gap
+sits in time, who was closer to the ball when it was last seen and when it reappears, touches
+just before and after the gap, how the two teams move (pushing up or dropping back, turning),
+where play is on the pitch, and the teams' shape (width, length, height of the back line,
+spread at the gap edges). It is right on about 83% of gap frames on held-out matches. It is used
+**only inside gaps**, with a small weight: the other team pays `0.25 × |log-odds|` per frame. A
+model used on every frame, or with a larger weight, did worse (section 5).
 
-### 1.4 Team evidence and the decoder
+**Kept in the code, not used:** a *switch hazard* model (`learned_switch.py`), which lowered the
+switch cost where a change looked likely. It could not tell where possession changes (AUC
+0.564) and gained at most +0.001.
 
-A Viterbi decoder over H / A / D. Costs: a switch between H and A 3.5, into or out of D 6.0,
-dead-score weight 2.0.
+### 1.4 Team evidence, the decoder and the clean-up
 
-- **Distance margin.** Team evidence is how much closer the nearest home player is to the ball
-  than the nearest away player (or the reverse), fading to nothing when nobody is within 5 m. It
-  is moved 0.5 s later (12 frames), because the receiver nears the ball just before touching it.
+A Viterbi decoder over H / A / D. Costs: a switch between H and A 10, into or out of D 18,
+dead-score weight 2.0. These were swept in a grid with a leave-one-match-out check
+(`scripts/cost_sweep.py`, section 5); the earlier costs (3.5 and 6) dated from before most of
+the evidence existed.
+
+Team evidence on each frame adds up:
+
+- **Distance margin.** How much closer the nearest home player is to the ball than the nearest
+  away player (or the reverse), fading to nothing when nobody is within 5 m; weight 0.5. It is
+  moved 24 frames (0.96 s) later, because the receiver nears the ball before he touches it.
 - **Fast-ball rule.** While the ball moves faster than 12 m/s (a pass, a shot, a long ball) no
   team gets distance evidence: the player it flies past is often the nearest one.
+- **Touches**, scored by the touch model (section 1.3).
 - **Restart taker.** When a dead spell of at least 3 s ends, the team nearest the ball around
   that moment takes the restart (the other team pays an extra cost for 2 s).
-- **Switch placement.** Where no team has evidence (ball missing, flying, or far from
-  everybody), H and A cost the same, so the decoder can put a switch anywhere in that stretch
-  for the same total cost, and by default it lands on the first frame. In reality possession
-  changes when the ball arrives. We place each switch 75% of the way into its no-evidence
-  stretch. Only frames where H and A cost exactly the same change label, so the decoder's
-  choice of possessions is untouched; only the timing moves.
-- **Touch evidence.** Our diagnosis on the dev set showed that most missed possessions are
-  short spells of the other team that the decoder skips, because a few frames of distance
-  evidence cannot pay the switch cost; lowering that cost would bring the flicker back. So we
-  look for a *touch*: the ball's velocity changes by at least 3 m/s between 0.12 s before and
-  0.12 s after a frame, while a player is within 2 m of the ball and the other team's nearest
-  player is at least 0.1 m further away. For 0.8 s after a touch the other team pays an extra
-  cost. On the dev set 77–79% of true switches come with such a touch, and 85–86% of the
-  switches it claims are right.
+- **Inside ball gaps**, the gap team model (section 1.3).
+
+Then two clean-up steps:
+
+- **Switch placement.** Where no team has evidence, H and A cost the same, so the decoder can
+  put a switch anywhere in that stretch for the same total cost, and by default it lands on the
+  first frame. In reality possession changes when the ball arrives. We move each such switch to
+  the end of its no-evidence stretch (the first frame with evidence again). Only frames where
+  H and A cost exactly the same change label, so the possessions themselves are untouched.
+- **Minimum spell of 1 s.** A run of one team shorter than 1 s that sits *between two runs of
+  the other team* is given to that other team: a touch without control or a deflection is not a
+  change of possession (CHALLENGE.md). Runs next to a dead ball are kept, because a restart has a
+  clear possessor.
 
 **Output.** One label per frame, header `frame,label`. We write no `X` anywhere (D14): every
 frame gets `H`, `A` or `D`. An `X` cannot raise spellF1, and on a graded frame it always counts
@@ -197,14 +230,14 @@ as a miss for macroF1.
 | Tracking speed field | No | Its unit is not documented and it may be mostly empty; we compute ball and player speeds from positions |
 | Smart Tagging, `SET PIECES` | **Yes, as evidence** | Kick Off (Start) marks the second-half kickoff; the other restart types open a dead-ball window before the tag. Tags are automatic and unreviewed, so they only add to the dead-ball score |
 | Smart Tagging, team on a tag | No | 36 tags carry no team, including every throw-in (DATA.md); the team taking a restart comes from who is nearest the ball |
-| Smart Tagging, other codes (build up, transitions, …) | No | Phase-of-play tags, too coarse in time for per-frame possession, and we could not test them: the dev set has no such tags |
-| Homography | Loaded, not used | Our stages work in pitch metres straight from tracking; nothing needed pixels |
-| Tactical video | No | We did not attempt our own ball detection; the time went into the decoder |
-| Broadcast video, tracking and homography | No | On its own timeline, with cuts and replays, and a third of its frames have no usable homography |
+| Smart Tagging, phase codes (build up, progression, …) | Checked, not used | `scripts/tag_team_check.py` compared each code's team with our own labels: BUILD UP and PROGRESSION point to the team in possession about 90–94% of the time but cover only about 5% of gap frames, and the codes that cover gaps agree only 60–74% of the time. Weaker than our gap model, and IDSSE has no tags to test them on |
+| Tactical homography | Checked, not used | `scripts/camera_aim_check.py` asked whether the camera points at the ball during gaps: the picture centre is a median 23.6 m from the ball, against 20.3 m for the players' centre, and closer on only 28–35% of frames. The wide tactical camera adds no ball information |
+| Broadcast tracking | Checked, not used | `scripts/broadcast_sync_check.py` aligned it to the tactical timeline by matching the two ball tracks (no mapping is provided): 99,000 broadcast frames synced, players within 0.3–0.4 m. It would fill only 9.2% of tactical gap frames, because the broadcast mostly shows replays and close-ups when the tactical ball is lost, and the gain cannot be measured on IDSSE |
+| Tactical and broadcast video | No | We did not attempt our own ball detection |
 | Public 5 minutes of ground truth | Pipeline check only | Never used to train, tune or choose between versions (D9) |
 
 No pre-trained model, commercial API or external service is part of the pipeline. Everything
-that runs is in the repository: the code, the configuration and the fitted model file.
+that runs is in the repository: the code, the configuration and the fitted model files.
 
 ## 3. Training data
 
@@ -226,37 +259,45 @@ ground truth are used only to check that the pipeline works, never to choose bet
 **How it becomes our truth.** Ball alive gives `H` or `A` from the possession flag; ball dead
 gives `D` (D17).
 
-**Making it as hard as our match.** IDSSE's ball is almost always tracked; ours is missing on
-40.7% of graded frames. We remove the ball from IDSSE in gaps with the lengths measured on our
-match (aggregates from our ball EDA: how much is missing and how long the gaps are), with a
-fixed seed so every version sees the same gaps. Where the gaps go matters, so every comparison
-is run with two kinds of cut:
+**Making it look like our match.** IDSSE's ball is almost always tracked; ours is missing on
+40.7% of graded frames. Three steps make the dev set look like ours:
 
-- **random:** gaps start anywhere, like the ball hidden in open play;
-- **stoppage:** gaps start as the ball goes dead, like the ball lost as it leaves the pitch.
-
-Our real gaps are a mix of both, so the two bracket the truth. For the tag clues, IDSSE has no
-Smart Tagging, so we simulate restart tags from the dev-set truth at the rate seen on our match.
+- **Gaps.** We remove the ball from IDSSE in gaps with the lengths measured on our match (from
+  our ball EDA), with a fixed seed, so every version sees the same gaps. Where the gaps go
+  matters, so every comparison runs with two kinds of cut: **random** (anywhere, like the ball
+  hidden in open play) and **stoppage** (starting as the ball goes dead). Our real gaps are a
+  mix of both.
+- **Smoothing** (`configs/devset-smooth.yaml`). Our provider's ball track is smoother than
+  IDSSE's: a kick's sharp turn comes out rounded. So the IDSSE ball is smoothed (Gaussian,
+  sigma 0.25 s) before the gaps are cut. The sigma was chosen with label-free touch statistics,
+  comparing the two tracking sets: the distance from the ball to the nearest player at a
+  velocity-change peak (1.66 m on the smoothed IDSSE ball, 1.75 m on ours), the share of clear
+  touchers and the time shift between ball and players. Sigma 0.2 and 0.3 led to the same
+  choices. Every step after the change of decoder costs and timing was chosen on this smoothed
+  dev set.
+- **Tags.** IDSSE has no Smart Tagging, so for the tag clues we simulate restart tags from the
+  dev-set truth, at the rate seen on our match.
 
 **Use 1: choosing settings.** Every candidate version runs on the seven matches and is scored
-with the official metric. Thresholds and costs chosen this way are all visible in
-`configs/final.yaml`.
+with the official metric. Seed 0 is used for tuning; seed 1 only confirms.
 
-**Use 2: fitting the learned dead-ball score.** The model in the submission
-(`models/deadball_stoppage_all.json`) is fitted by `scripts/fit_deadball.py` on all seven
-matches, with the ball cut by stoppage gaps under two training seeds (100 and 101, not the
-seeds 0 and 1 used for scoring), every 5th frame: 172,220 gap frames and 228,844 seen-ball
-frames. The target is the dataset's own flag (ball dead or not).
+**Use 2: fitting the three models.** Each model is fitted by its script on IDSSE with the ball
+cut like ours, under both gap kinds, with training seeds 100 and 101 (never the scoring seeds 0
+and 1). The team and touch models are trained on home/away-swapped copies too, so they cannot
+learn that "home" is more likely. The target is always the dataset's own flag.
+
+| Model | Script | Fitted on | Rows in the submitted model file |
+|---|---|---|---|
+| Dead ball v3 | `scripts/fit_deadball.py` | stoppage gaps, every 5th frame | 172,220 gap frames, 228,844 seen-ball frames |
+| Team in gaps v5 | `scripts/fit_team.py` | frames whose truth is H or A, every 5th frame | 312,500 gap frames (572,428 seen-ball frames for the seen part, not used) |
+| Touch team | `scripts/fit_touch.py` | every detected touch whose truth just after is H or A | 44,380 touches |
 
 **Keeping the dev score honest.** Scoring a match with a model that was fitted on it would
-flatter the score. So on the dev set each match is scored with a model fitted on the *other
-six* (`models/deadball_stoppage_lomo_<match>.json`, in the twin config
-`configs/exp/poss-blend-learned70-stopmodel.yaml`). Every dev-set number for the blend in this
-document comes from those leave-one-match-out models. Only the submission itself uses the
-model fitted on all seven. For the touch settings, picked from a sweep of 17 configs, we ran
-the same kind of check (`scripts/touch_lomo.py`): choosing the config on six matches and
-scoring the seventh gave the same gain as choosing on all seven, and every fold picked the same
-config.
+flatter the score. So on the dev set each match is scored with models fitted on the *other six*
+(`models/*_lomo_<match>.json`). Every dev-set number for a learned model in this document comes
+from those leave-one-match-out models; only the submission uses the models fitted on all
+seven. Settings picked from a sweep were checked the same way (`scripts/touch_lomo.py` for the
+touch settings, the leave-one-match-out step of `scripts/cost_sweep.py` for the costs).
 
 [1] Bassek, M., Rein, R., Weber, H. et al. "An integrated dataset of spatiotemporal and event
 data in elite soccer." *Scientific Data* 12, 195 (2025). https://doi.org/10.1038/s41597-025-04505-y
@@ -268,118 +309,163 @@ How our labels follow the official definitions (CHALLENGE.md), as set in `config
 | Situation | Official rule | Where we drew the line |
 |---|---|---|
 | States | Every graded frame is `H`, `A` or `D` | The decoder has exactly these three states |
-| Loose or contested ball | Possession stays with the last team that had it | When no player is within 5 m of the ball there is no team evidence, so the decoder keeps the current state |
-| A deflection, a pass flying past | Not a change of possession | A change has a cost, so a few frames of distance evidence for the other team cannot pay for it |
-| Controlled possession by the other team | A change of possession | Sustained evidence (the other team clearly closer to the ball over several frames) pays the switch cost. Evidence is moved 0.5 s later, because the receiver nears the ball just before the touch |
-| A short possession by the other team | A controlled touch is a possession, however short | Touch evidence: a sharp change of the ball's velocity next to one team's player gives that team strong evidence for 0.8 s |
-| A challenge or duel | No change without control | If both teams' nearest players are about equally close at a touch (within 0.1 m), the touch gives no evidence to either |
-| The moment of the change | When the new team takes control | Inside a stretch with no evidence (ball missing or in flight), the switch is placed 75% of the way through, close to when the ball arrives, not when it leaves |
+| Loose or contested ball | Possession stays with the last team that had it | When no player is within 5 m of the ball there is no distance evidence, so the decoder keeps the current state unless a touch or the gap model says otherwise |
+| A deflection, a touch without control | Not a change of possession | A change has a cost, so a few frames of evidence for the other team cannot pay for it. A spell under 1 s inside the other team's possession is given back to that team |
+| Controlled possession by the other team | A change of possession | Sustained evidence (the other team clearly closer to the ball over several frames, or a confident touch) pays the switch cost. Distance evidence is moved 0.96 s later, because the receiver nears the ball before the touch |
+| A short possession by the other team | A controlled touch is a possession, however short | A touch gives its team evidence for 0.8 s, weighted by how sure the touch model is. A spell must last at least 1 s, unless it borders a dead ball |
+| A challenge or duel | No change without control | The touch model sees both teams' distances around the touch; when it is unsure, its evidence is close to zero |
+| The moment of the change | When the new team takes control | Inside a stretch with no evidence, the switch goes to the end of the stretch: when the ball arrives, not when it leaves |
 | Aerial duel, a ball flying past | Not a change without control | Our tracking has no ball height. While the ball moves faster than 12 m/s, no player gets distance evidence, so the ball must slow down near a player, or be touched, before possession can change |
 | Restart after a stoppage | There is a clear possessor | When a dead spell of at least 3 s ends, the team nearest the ball around that moment takes the restart |
 | Dead ball | Always `D`, never a possession | The dead-ball score pulls the decoder towards `D`; second-half frames before its kickoff are `D` |
-| Ball missing | (not a rule: the central difficulty) | Inside a ball gap there is no team evidence, so the decoder holds the last owner until the ball returns, unless the dead-ball score says the ball went dead |
+| Ball missing | (not a rule: the central difficulty) | Inside a ball gap, the gap team model gives weak evidence; otherwise the decoder holds the last owner, unless the dead-ball score says the ball went dead |
 | Abstaining (`X`) | `X` on a graded frame is a miss for macroF1 | We write no `X` (D14) |
 
 ## 5. Results
 
 We have no answers for the full match, so we report three kinds of evidence (D11): the dev-set
-score, statistics on our match that need no answers, and the public five-minute check.
+score, statistics on our match that need no answers, and the public five-minute check. The dev
+score compares versions; it does not predict our score on this match (section 6).
 
-**Dev set: the submitted version against the baseline configuration** (mean spellF1 over the 7
-matches, official metric).
+**Two dev sets, two scales.** Up to the change of decoder costs and timing we scored on the dev
+set with the IDSSE ball as it is; every later step was scored on the smoothed dev set
+(section 3). Smoothing lowers every score, so numbers from the two are not comparable: each step
+below is compared with the step before it on the same dev set.
 
-| Dev-set run | Baseline | Submitted (v1.2) | Gain |
-|---|---|---|---|
-| seed 0, random gaps | 0.212 | 0.470 | +0.258 |
-| seed 0, stoppage gaps | 0.269 | 0.519 | +0.250 |
-| seed 1, random gaps | 0.201 | 0.455 | +0.254 |
-| seed 1, stoppage gaps | 0.266 | 0.507 | +0.241 |
+**The submitted version.** Mean spellF1 over the 7 matches, official metric. Because of the
+change of dev set, the gain over the baseline is shown in two parts, each on one dev set.
 
-The dev score compares versions; it does not predict our score on this match (section 6).
+| Dev-set run | Original dev set: baseline configuration | Original dev set: first submission (v1.2) | Smoothed dev set: after costs and timing | Smoothed dev set: submitted |
+|---|---|---|---|---|
+| seed 0, random gaps | 0.212 | 0.470 | 0.377 | **0.462** |
+| seed 0, stoppage gaps | 0.269 | 0.519 | 0.412 | **0.513** |
+| seed 1, random gaps | 0.201 | 0.455 | not reported | **0.452** |
+| seed 1, stoppage gaps | 0.266 | 0.507 | not reported | **0.499** |
 
-**What we kept, step by step** (change in dev-set spellF1 against the step before it; seed 0
-random / stoppage, then seed 1 random / stoppage; matches better of 7).
+On the original dev set the first submission roughly doubled the baseline configuration's score.
+On the smoothed dev set, the steps after it added +0.085 / +0.101 (seed 0, random / stoppage).
+The costs-and-timing step in between gained +0.022 / +0.021 and then +0.009 / +0.010 on the
+original dev set (table below).
+
+**What we kept, step by step** (change in dev-set spellF1 against the step before it, mean over
+the 7 matches; seed 0 random / stoppage, then seed 1 random / stoppage).
+
+*On the original dev set:*
 
 | Step | Seed 0 | Seed 1 | Verdict |
 |---|---|---|---|
 | H / A / D decoder with distance margin, graded gap score, evidence lag, fast-ball rule (against the baseline configuration) | +0.059 / +0.098 (7/7) | +0.057 / +0.094 (7/7) | kept |
 | + still ball at a restart spot, restart-taker evidence | +0.080 / +0.042 (7/7) | +0.080 / +0.044 (7/7) | kept |
-| + switch placement 0.75 | +0.022 / +0.027 (7/7) | +0.025 / +0.026 (7/7) | kept: under +0.04, but better on all 7 matches in all four runs |
-| + touch evidence | +0.056 / +0.060 (7/7) | +0.055 / +0.055 (7/7) | kept; leave-one-match-out check gives the same gain |
-| + dead-score blend (0.3 hand-built, 0.7 learned) | +0.040 / +0.023 (7/7, 7/7) | +0.037 / +0.022 (6/7, 7/7) | kept **by exception**: under +0.04 in three of the four runs (section 1.3) |
+| + switch placement 0.75 | +0.022 / +0.027 (7/7) | +0.025 / +0.026 (7/7) | kept by decision: under +0.04, better on 7/7 in all four runs |
+| + rule-based touch evidence | +0.056 / +0.060 (7/7) | +0.055 / +0.055 (7/7) | kept; the leave-one-match-out check gives the same gain |
+| + dead-score blend (0.3 hand-built, 0.7 learned v2) | +0.040 / +0.023 (7/7, 7/7) | +0.037 / +0.022 (6/7, 7/7) | kept by exception (D24): this was the first submission, v1.2 |
+| + decoder costs 10 / 18 / 18 and switch timing | costs +0.022 / +0.021 (7/7); timing +0.009 / +0.010 | timing +0.010 / +0.011 | kept by exception |
 
-**What we tried and dropped.** Each was run under the same check; every row, with the
-per-match breakdown, is in `experiments/RESULTS.md`.
+*On the smoothed dev set* (seed 1 was not reported for the first four steps):
+
+| Step | Seed 0 | Seed 1 | Verdict |
+|---|---|---|---|
+| Touch distance 4 m, evidence lag 24 frames | +0.025 / +0.034 | not reported | kept by decision |
+| + gap team model (first version), weight 0.25, gaps only | +0.019 / +0.015 | not reported | kept by decision |
+| + gap team model v4, minimum spell 1 s | +0.015 / +0.014 | not reported | kept by decision |
+| + gap team model v5 (team shape) | +0.005 / +0.006 | not reported | kept by decision |
+| + dead-ball model v3 | +0.006 / +0.011 | +0.005 / +0.009 | kept by decision |
+| + touch team model | +0.015 / +0.021 | +0.013 / +0.021 | kept by decision |
+
+**What limits the score** (oracle runs: one part of the pipeline is given the truth, the rest
+stays real; smoothed dev set, seed 0, random gaps, against the configuration of the time).
+
+| Given the truth for | Gain | What it told us |
+|---|---|---|
+| every touch, with its team | +0.149 | touches are the biggest lever; led to the touch model |
+| who has the ball inside gaps | +0.145 | the other big lever; no feature set or model got past about 83% there |
+| the team of the touches we already find | +0.094 | most of the touch gain is picking the right team, not finding more touches |
+| dead ball, everywhere | +0.078 | dead ball still matters |
+| dead ball, inside gaps only | +0.056 | most of the dead-ball loss is in gaps |
+| dead ball, where the ball is seen | +0.021 | the seen part is nearly solved |
+| when possession changes (not who) | +0.009 | timing is not the problem |
+| the whole ball track (no gaps) | 0.704 in total | almost all of the distance between our score and 0.70 is the missing ball |
+
+**What we tried and dropped.** Each was run under the same check; the rows are in
+`experiments/RESULTS.md`.
 
 | Tried | Result (spellF1 change) | Why dropped |
 |---|---|---|
-| Ball: Kalman smoother | +0.000 to +0.001 | Same as `interpolate`; our gaps are too long to fill |
+| Ball: Kalman smoother; longer interpolation (up to 2 s) | +0.000 to +0.001 | Our gaps are too long to fill |
 | Decoder with nearest-team evidence, or a plain switch cost | −0.012 to +0.008 | Noise; the distance margin beats both |
 | Flat dead score (every gap leans dead) | +0.006 / +0.045 | No gain under random gaps: it turns live gaps into `D` |
 | Velocity matching (a player moving with the ball) | +0.000 | No effect; already covered by the nearest-player evidence |
 | Landing point of a fast ball | −0.019 to −0.035 (0/7) | Adds 40–60 possessions per match and precision falls by 0.06 to 0.12 |
 | Team near the ball where it reappears after a long gap | −0.004 to 0.000 | The nearest team at that moment is often not the one with the ball |
-| Team shape inside ball gaps (the more spread-out team has it) | +0.000 to +0.004 | No better than keeping the last owner |
-| One-step changes of single settings (switch cost, dead costs and weight, team cost, evidence lag, fast-ball speed), checked on the 15 November configuration | none better than +0.001 | The chosen values sit on a flat optimum |
+| Team shape inside ball gaps, as a rule (the more spread-out team has it) | +0.000 to +0.004 | No better than keeping the last owner |
 | Restart windows halved, or the tag clue off (with simulated tags) | +0.002 to +0.007 | Gains in all four runs, but on only 5 of 7 matches in at least one |
-| Learned dead-ball score alone, in place of the hand-built gap score | +0.045 / +0.008 / +0.038 / +0.004 | Wins under random gaps only |
-| Learned score only inside gaps | +0.014 / −0.009 / +0.010 / −0.015 | Worse under stoppage gaps |
-| Blend weights 0.3 and 0.5; 0.7 with the model trained on both gap kinds | up to +0.048 / +0.020 / +0.038 / +0.017 | The stoppage-gap model at 0.7 was steadier across the four runs |
+| Learned dead-ball score alone, or only inside gaps | wins under random gaps only | Worse under stoppage gaps; the blend fixed this |
+| Dead-ball weight 0.85 instead of 0.7; dead-ball models refitted on the smoothed dev set | +0.004 / +0.001; +0.008 / −0.004 | Within noise, or mixed signs |
+| Touch: smaller or larger velocity change (2.0, 1.5, 4.0 m/s); hold 0.5 s | −0.003 to −0.019 | 3 m/s and 0.8 s were best |
+| Gap team model: on every frame, or as the only team evidence; weight above 0.25 | worse | The distance margin and touches are better where the ball is seen; a larger weight over-trusts an 83% model |
+| Gap team model v6 (more timing inputs); the same inputs in a gradient-boosted model (LightGBM, a check only) | +0.002 / +0.002; gap accuracy 0.827 to 0.834 | Both stop at about 83%: the inputs, not the model, are the limit |
+| Gap team model v4 without the team-shape inputs; minimum spell 2 s | worse | The shape inputs carry signal; 2 s removes real short possessions |
+| Learned switch hazard (section 1.3) | +0.001 at best | Player movement does not show when possession changes |
+| Lower decoder costs, evidence lag 12 frames | small losses | Covered by the cost sweep |
+| Camera aim, broadcast fill, Smart Tagging phases as gap evidence | see section 2 | Too little new information, and none can be measured on IDSSE |
 
-**What limits the score** (diagnosis runs on the dev set, before touch evidence). Replacing our
-dead-ball score with the truth adds +0.07 to +0.10: the ceiling for any dead-ball detector. Of
-the true possessions that fall mostly inside a ball gap, 97% are missed. With the full ball and
-a perfect dead-ball call, 87% of the possessions still missed are shorter than 5 s.
+**On our match** (label-free counts from `scripts/label_free_check.py` and
+`scripts/compare_submissions.py`; they show the output is sane and never choose between
+versions).
 
-**On our match** (label-free counts from `scripts/label_free_check.py`; they show the output
-is sane and never choose between versions).
-
-| | Submitted (v1.2) |
+| | Submitted |
 |---|---|
 | Rows | 199,319, no `X` |
-| Graded halves: `H` / `A` / `D` | 32.4% / 22.9% / 44.7% |
-| All frames: `H` / `A` / `D` | 25.8% / 18.3% / 55.9% |
-| Possessions | 518, mean 6.8 s |
+| Graded halves: `H` / `A` / `D` | [FILL: H% / A% / D%, graded halves] |
+| All frames: `H` / `A` / `D` | [FILL: H% / A% / D%, all frames] |
+| Possessions | [FILL: number of possessions], mean [FILL: mean length] s |
 | Outside the graded halves | every frame is `D` (40,462 frames, never scored) |
 
-Possessions in the graded halves rose from 455 (after switch placement) to 501 (with touch
-evidence) to 518 (with the blend). For reference, the baseline configuration gives 669
-possessions over all frames (mean 7.6 s); the public five minutes hold 17 possessions
-averaging 14.2 s, and the IDSSE matches 370–511 possessions of 5.5–9.2 s each.
+Each new version was compared with the one before it on our match. The dead-ball model v3
+changed 1.5% of the frames; the touch model changed 2.3%, almost all `H` to `A` or `A` to `H`,
+with the dead-ball share unchanged. For reference, the baseline configuration gives 669
+possessions on our match; the public five minutes hold 17 possessions averaging 14.2 s, and
+the IDSSE matches 370–511 possessions of 5.5–9.2 s each.
 
-**Public five-minute check.** It was run on the configuration frozen on 15 November (tag
-`v1.0-freeze`): spellF1 0.410 and macroF1 0.681, against 0.326 and 0.621 for the baseline
-(bootstrap interval for spellF1: 0.277 to 0.544). The three later steps were deliberately not
-scored on it. With 17 possessions, one possession moves the score by about 0.06, so the public
-window only shows that the pipeline works (D9); it cannot rank versions.
+**Public five-minute check.** It was last scored on the configuration frozen on 15 November
+(tag `v1.0-freeze`): spellF1 0.410 and macroF1 0.681, against 0.326 and 0.621 for the baseline
+(bootstrap interval for spellF1: 0.277 to 0.544). Later versions were only checked to load and
+score, never compared on it: with 17 possessions, one possession moves the score by about 0.06
+(D9). It is also not a typical stretch of football: on the IDSSE matches, only 5.2% of 5-minute
+windows are as calm (17 possessions or fewer, 14.2 s or longer on average;
+`scripts/window_check.py`).
 
 ## 6. Limitations
 
 **Where it fails.**
 
-- **Possessions inside ball gaps are mostly lost.** With no ball there is no team evidence, so
-  the decoder holds the last owner through the whole gap. On the dev set 97% of the true
-  possessions that fall mostly inside a gap are missed, and our ball is missing on 40.7% of
-  graded frames, almost all of it in gaps longer than 5 s.
-- **Short possessions.** Most of the remaining misses are possessions under 5 s. Touch
-  evidence recovers part of them, but only where the ball is seen, and about one in seven of
-  the switches it claims is wrong.
-- **Dead ball is far from perfect.** A perfect dead-ball call would add +0.07 to +0.10 on the
-  dev set. Our score is a mix of hand-set weights and a small model.
+- **Possessions inside ball gaps.** Our ball is missing on 40.7% of graded frames, almost all of
+  it in gaps longer than 5 s. The gap team model is right on about 83% of gap frames, and no
+  input we tried pushed it further: the missing ball is information we do not have. A clean
+  ball would take the dev score to 0.704.
+- **Short possessions.** Touches recover many, but only where the ball is seen. The minimum
+  spell of 1 s also removes some real possessions shorter than that.
+- **Dead ball.** A perfect dead-ball call would still add +0.078 on the dev set, most of it
+  inside gaps.
 - **No ball height, no identities.** High balls and aerial duels cannot be seen directly; the
   fast-ball rule is a stand-in. Slots are tracklets that swap, so we cannot follow one player.
-- **Outside the graded halves every frame is `D`.** This is a side effect of the blend, not a
-  decision about those frames. They are never scored.
+- **Outside the graded halves every frame is `D`.** This is a side effect of the dead-ball
+  model, not a decision about those frames. They are never scored.
 
 **How sure we are of the choices.**
 
-- **The blend is our least certain step.** It was chosen from about 8 variants on the same 7
-  matches, so part of its lead may be luck, and its gain under stoppage gaps (+0.022 to +0.023)
-  is well below our own +0.04 bar. We accepted it by exception (section 1.3).
-- **The learned model assumes our gaps look like stoppage gaps.** It was trained on gaps that
-  start as the ball goes dead. How dead a ball gap is depends on where the simulated gaps are
-  placed, and the real mix on our match is unknown.
-- **We checked neighbours one setting at a time**, not combinations of settings.
+- **Most of our later steps gained less than +0.04.** We adopted them because all four runs
+  agreed, by team decision. Each is small enough that, on its own, part of it may be noise.
+- **Many choices were made on the same 7 matches.** The learned models are scored
+  leave-one-match-out, but the choice *between* variants (blend weights, model versions, costs,
+  touch settings) was made on the same matches, so the total gain is likely somewhat flattered.
+- **The dead-ball model assumes our gaps look like stoppage gaps.** The real mix on our match is
+  unknown.
+- **The possession count does not always move the same way on the two sets.** Some steps
+  changed the count on our match in the opposite direction from the dev set: the learned team
+  evidence gave more possessions on the dev set but fewer, longer ones on our match
+  (`scripts/team_diag.py` compares the two, label-free). We cannot tell which is right without
+  answers, and the dev set's own counts stay below its truth.
 
 **What the dev set cannot tell us.**
 
@@ -387,32 +473,29 @@ window only shows that the pipeline works (D9); it cannot rank versions.
   flag, which may draw the line on loose balls and restarts differently.
 - **It is another league and another tracking provider, with cleaner tracking.** Its players
   are identified and do not swap; ours averages 20.5 tracked objects per graded frame, with no
-  identities and tracklets that swap.
-- **Simulated gaps only bracket our real gaps.** Random and stoppage cuts are the two extremes.
-- **Simulated tags are cleaner than real ones.** Smart Tagging is automatic and unreviewed,
-  sparse (5 free kicks in the match), and no throw-in carries a team.
-- **Some clues gain less on our match.** The still-ball clue relies on the ball staying
-  visible during a stoppage; on our match it fires on only about 930 frames. Touch evidence
-  added about 10% more possessions on our match, against 20–30% on the dev set.
-- **No full-match score before results day.** The dev set says the method roughly doubles the
-  baseline's score there; we do not claim a number for this match.
+  identities and tracklets that swap. Smoothing makes its ball look more like ours, but only on
+  a few statistics.
+- **Simulated gaps and tags only bracket the real ones.** Random and stoppage cuts are the two
+  extremes, and simulated tags are cleaner than Smart Tagging.
+- **No full-match score before results day.** We do not claim a number for this match.
 
-**What we would fix with more time.** Evidence for who has the ball *inside* gaps (the largest
-loss); touch inputs for the learned dead-ball model; our own ball detection on the tactical
-video to shorten the gaps; tracklet swaps, missing players and noisy tags simulated on the dev
-set; and a dev set from a second source, so that choices are not made on the same 7 matches.
+**What we would fix with more time.** Evidence from outside the tactical tracking for the ball
+gaps: the broadcast tracking (it would fill about 9% of gap frames) and our own ball detection
+on the video. Touch inputs for the dead-ball model; the decoder costs and the gap weight swept
+again with the touch model on; the touch model trained on more seeds; and a dev set from a
+second source, so that choices are not all made on the same 7 matches.
 
 ## 7. Reproduction: how to run it
 
 Requirements: Python 3.12, `make`, `git`, and the organisers' data bundle in a folder
 **outside** the repository. Dependencies are pinned to exact versions in `requirements.txt`
-(numpy, pandas, PyYAML). No training is needed to reproduce the file: the fitted model is a
-small JSON file in the repository.
+(numpy, pandas, PyYAML). No training is needed to reproduce the file: the fitted models are
+small JSON files in `models/`.
 
 ```bash
 git clone --recurse-submodules https://github.com/falafelona/more-than-a-hack-2027
 cd more-than-a-hack-2027
-git checkout v1.2                         # the submitted version
+git checkout [FILL: tag]                  # the submitted version
 make setup                                # .venv and pinned dependencies
 export MTAH_DATA_DIR=/path/to/mtah-data   # the data bundle, outside the repo
 make submission                           # writes outputs/Falafelona.csv from configs/final.yaml
@@ -423,23 +506,24 @@ shasum -a 256 outputs/Falafelona.csv
 | | |
 |---|---|
 | Output | `outputs/Falafelona.csv`, 199,319 rows, header `frame,label` |
-| Expected SHA-256 | `ea403a67c0ce2ea67b00decb50a766781c0c1bf51762f56f7d4926263b0e43a2` |
+| Expected SHA-256 | `[FILL: sha256]` |
 | Official validator | OK |
-| Tests | `make check`: lint, and 802 tests on synthetic data only (no match data needed) |
+| Tests | `make check`: lint, and 880 tests on synthetic data only (no match data needed) |
 
-**Determinism.** A fixed seed, no order-dependent parallelism, and the model is applied, not
-trained, at run time. We built the submitted file twice and got the identical SHA-256. Earlier,
-at the `v1.0-freeze` tag, a clean clone with a fresh environment gave the identical file on
-macOS and on Linux (Docker `python:3.12`).
+**Determinism.** A fixed seed, no order-dependent parallelism, and the models are applied, not
+trained, at run time. We built the submitted file twice and got the identical SHA-256.
+Earlier, at the `v1.0-freeze` tag, a clean clone with a fresh environment gave the
+identical file on macOS and on Linux (Docker `python:3.12`).
 
-**Repeating the dev-set comparisons.** Download IDSSE [1] to a folder outside the repository,
-set `IDSSE_DATA_DIR`, and run `scripts/devset_eval.py` (`experiments/README.md` explains the
-setup and the options for the four runs). The reference for the submitted version on the dev set is
-`configs/exp/poss-blend-learned70-stopmodel.yaml`. To refit the model files:
-`scripts/fit_deadball.py` (it reads IDSSE only).
+**Repeating the dev-set work.** Download IDSSE [1] to a folder outside the repository, set
+`IDSSE_DATA_DIR`, and run `scripts/devset_eval.py` with `--devset configs/devset-smooth.yaml`
+(`experiments/README.md` explains the four runs). On the dev set, a config must point at the
+leave-one-match-out model files (`models/*_lomo_{match_id}.json`), not at the `*_all.json` files
+of the submission. To refit the models: `scripts/fit_deadball.py`, `scripts/fit_team.py` and
+`scripts/fit_touch.py` (they read IDSSE only).
 
-**Data handling.** The match data is not in the repository (D1, D2): it is read
-from `MTAH_DATA_DIR`, and a check in the test suite refuses data-shaped files. AI coding
-assistants were used to write code and documentation. Our rule is that they never read match
-data and never run the pipeline on it: people run those commands and share only aggregates
-(`CLAUDE.md`, D4, D16).
+**Data handling.** The match data is not in the repository (D1, D2): it is read from
+`MTAH_DATA_DIR`, and a check in the test suite refuses data-shaped files. AI coding assistants
+were used to write code and documentation. Our rule is that they never read match data and
+never run the pipeline on it: people run those commands and share only aggregates (`CLAUDE.md`,
+D4, D16).
