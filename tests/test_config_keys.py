@@ -11,9 +11,9 @@ from falafelona.config import ConfigError, load_config, unknown_keys
 
 CONFIGS = vendor.REPO_ROOT / "configs"
 # devset.yaml configures the dev-set tool, not the pipeline, so it has no stage sections.
+# devset*.yaml configure the dev-set tool, not the pipeline, so they have no stage sections.
 PIPELINE_CONFIGS = sorted(p for p in [*CONFIGS.glob("*.yaml"), *CONFIGS.glob("exp/*.yaml")]
-                          if p.name != "devset.yaml")
-
+                          if not p.name.startswith("devset"))
 
 def write(tmp_path, cfg):
     path = tmp_path / "cfg.yaml"

@@ -101,14 +101,14 @@ def test_each_mode_hands_the_decoder_the_truth_on_its_frames_only(dev, monkeypat
         return real(match, cfg, prepared)
 
     monkeypatch.setattr(devset, "predict_labels", spy)
-    devset.run_devset({"final": FINAL}, DEV_CFG, [dev], oracles=devset.ORACLES)
+    devset.run_devset({"final": FINAL}, DEV_CFG, [dev], oracles=devset.DEAD_ORACLES)
 
     (missing, ours), *oracles = seen
     graded = np.isin(dev.truth, ("H", "A", "D"))
     truth = (dev.truth == "D").astype(float)
     masks = {"dead": graded, "dead_gaps": graded & missing, "dead_seen": graded & ~missing}
     assert missing.any() and (~missing).any()
-    for mode, (_missing, score) in zip(devset.ORACLES, oracles, strict=True):
+    for mode, (_missing, score) in zip(devset.DEAD_ORACLES, oracles, strict=True):
         assert np.array_equal(score[masks[mode]], truth[masks[mode]])
         assert np.array_equal(score[~masks[mode]], ours[~masks[mode]])
 
@@ -228,3 +228,79 @@ def test_diagnose_reports_counts_per_config_and_changes_no_score(dev):
         assert sum(d[c] for c in devset.MISSED_CAUSES) == s["spell_missed"]
         assert sum(d[c] for c in devset.FAKE_CAUSES) == s["spell_spurious"]
         assert f"  {name}: missed" in text
+
+
+def test_the_switch_oracle_only_cheapens_switches_in_gaps_near_a_true_change(dev, monkeypatch):
+    seen = {}
+    real = devset.predict_labels
+
+    def spy(match, cfg, prepared=None):
+        if "_oracle_team_switch" in cfg["possession"]:
+            seen["costs"] = cfg["possession"]["_oracle_team_switch"].copy()
+            seen["missing"] = np.isnan(prepared[0].ball_xy[:, 0])
+        return real(match, cfg, prepared)
+
+    monkeypatch.setattr(devset, "predict_labels", spy)
+    result = devset.run_devset({"final": FINAL}, DEV_CFG, [dev], oracles=("switch",))
+
+    base = float(FINAL["possession"]["switch_cost"])
+    costs, missing = seen["costs"], seen["missing"]
+    cheap = costs < base
+    assert cheap.any() and not cheap[~missing].any()
+    assert set(np.unique(costs)) <= {base, devset.ORACLE_SWITCH_COST}
+    assert "_oracle_team_switch" not in FINAL["possession"]           # the config is not changed
+    assert "final + oracle switch" in result["scores"]
+
+
+def test_the_team_oracle_adds_truth_evidence_only_inside_gaps(dev, monkeypatch):
+    seen = {}
+    real = devset.predict_labels
+
+    def spy(match, cfg, prepared=None):
+        if "_oracle_team_extra" in cfg["possession"]:
+            seen["extra"] = cfg["possession"]["_oracle_team_extra"].copy()
+            seen["missing"] = np.isnan(prepared[0].ball_xy[:, 0])
+        return real(match, cfg, prepared)
+
+    monkeypatch.setattr(devset, "predict_labels", spy)
+    result = devset.run_devset({"final": FINAL}, DEV_CFG, [dev], oracles=("team_gaps",))
+
+    extra, missing = seen["extra"], seen["missing"]
+    assert extra.shape == (len(dev.truth), 2) and not extra[~missing].any()
+    assert (extra[missing & (dev.truth == "H"), 1] == devset.ORACLE_TEAM_COST).all()
+    assert (extra[missing & (dev.truth == "A"), 0] == devset.ORACLE_TEAM_COST).all()
+    assert not extra[dev.truth == "D"].any()
+    a = result["scores"]["final + oracle team_gaps"]["J03WTEST"]
+    assert a["team_acc"] >= result["scores"]["final"]["J03WTEST"]["team_acc"]
+
+
+def test_team_changes_marks_the_first_frame_of_a_new_team_only():
+    truth = np.array(list("HHDDAAXAHH"))
+    period = np.ones(10, dtype=np.int8)
+    assert np.flatnonzero(devset.team_changes(truth, period)).tolist() == [4, 8]
+    period[4:] = 2                                          # a new half is not a change
+    assert np.flatnonzero(devset.team_changes(truth, period)).tolist() == [8]
+
+
+@pytest.mark.parametrize("mode", ["touch_team", "touch_all"])
+def test_the_touch_oracles_give_touches_the_true_team(dev, monkeypatch, mode):
+    seen = {}
+    real = devset.predict_labels
+
+    def spy(match, cfg, prepared=None):
+        if "_oracle_touch_events" in cfg["possession"]:
+            seen["events"] = cfg["possession"]["_oracle_touch_events"]
+            seen["fps"] = match.fps
+        return real(match, cfg, prepared)
+
+    monkeypatch.setattr(devset, "predict_labels", spy)
+    result = devset.run_devset({"final": FINAL}, DEV_CFG, [dev], oracles=(mode,))
+
+    touches, teams = seen["events"]
+    after = np.minimum(touches + round(devset.ORACLE_TOUCH_AFTER_S * seen["fps"]),
+                       len(dev.truth) - 1)
+    truth = dev.truth[after]
+    assert len(touches) == len(teams) and len(touches) > 0
+    assert (teams[truth == "H"] == 0).all() and (teams[truth == "A"] == 1).all()
+    assert (teams[~np.isin(truth, ["H", "A"])] == -1).all()
+    assert f"final + oracle {mode}" in result["scores"]

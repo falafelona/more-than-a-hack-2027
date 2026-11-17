@@ -65,7 +65,7 @@ def test_the_speed_search_does_not_cross_into_another_half():
 
 
 def test_the_model_version_was_bumped_so_old_model_files_are_refused():
-    assert ld.VERSION == 2
+    assert ld.VERSION == 3 and set(ld.READABLE) == {2, 3}     # v2 files still load (v3 gap)
 
 
 @pytest.mark.parametrize("tag", ["random", "stoppage", "nolen"])

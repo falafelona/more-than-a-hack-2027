@@ -36,6 +36,13 @@ degrade:
   # from there. Our gaps tend to start as the ball reaches a line (dead-ball EDA #28: 32% of gaps
   # start within 2 m of a line, against 9% of seen frames), so they start with the stoppage.
   stoppage_lead_s: 1.0
+  # Our provider smooths the ball track: a kick's sharp turn comes out rounded. Smoothing the
+  # IDSSE ball with a Gaussian of this sigma (s) before the gaps are cut makes it look like ours
+  # on the touch numbers (team_diag.py --smooth-ball: 0.25 s matches the nearest player at a
+  # velocity-change peak, 1.66 vs 1.75 m, the clear-toucher share and the ball/players time
+  # shift). 0 = off, which keeps the earlier RESULTS.md rows reproducible; set 0.25 (or use
+  # --devset with a copy) for the realistic dev set.
+  ball_smooth_s: 0.0
   gaps:                   # each bin's share of the MISSING frames (adds up to 1)
     # Gaps up to 5 s: the EDA bins. The three shortest hold under 0.05% each, so only a rough
     # size is known (13, 2 and 1 gaps); the shares below are about the right count of frames.

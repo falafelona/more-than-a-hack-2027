@@ -41,7 +41,10 @@ from pathlib import Path
 import numpy as np
 
 FORMAT = "falafelona-deadball-logreg"
-VERSION = 2                  # bump when a feature changes, so an old model file is refused
+VERSION = 3                  # bump when a feature changes, so an old model file is refused
+#                              v3: 8 more gap features (time in the gap, edges x time, player
+#                              speed trend, crowd at the gap edges, player spread). v2 files
+#                              still load: they use the first 12 gap columns (READABLE).
 
 # Windows of the player-speed features, in seconds on each side of the frame, and the other
 # constants of the features. They are part of the model: change one, bump VERSION.
@@ -52,6 +55,10 @@ CENTRE_SCALE_M = 5.0
 SPEED_CAP = 30.0             # m/s, ball speeds above this count as this
 SLOW_RUN_CAP_S = 30.0
 SPEED_LOOK_S = 0.5           # s: how far from a gap's edge to look for a known ball speed
+EDGE_DECAY_S = 4.0           # v3: an edge clue fades like exp(-seconds from that edge / this)
+TREND_S = 2.0                # v3: player speed in the next vs the last this many seconds
+CROWD_M = 10.0               # v3: players within this of where the ball left / comes back
+SPREAD_WINDOW_S = 1.0        # v3: player spread, smoothed +/- this
 
 # The settings the features read from the `deadball:` section (numbers >= 0, checked by
 # deadball.check_config). The speed block `speed:` and the ball block `ball_speed:` are read too.
@@ -59,10 +66,14 @@ SETTINGS = ("still_speed", "still_ball_speed", "still_ball_seconds", "spot_line_
             "spot_centre_m", "goal_area_depth_m", "goal_area_half_width_m", "out_margin")
 CONFIG_KEYS = ("model", "visible")     # the settings of the `learned:` block
 
-GAP_FEATURES = (
+GAP_FEATURES_V2 = (
     "log2_gap_s", "last_near_line", "next_near_line", "next_at_centre", "open_ended",
     "last_ball_speed", "next_ball_speed", "gap_players_slow",
     "players_speed_w1", "players_speed_w4", "players_speed_w12", "players_slow_w4",
+)
+GAP_FEATURES = GAP_FEATURES_V2 + (
+    "log_since_s", "log_until_s", "last_line_early", "next_restart_late", "speed_trend",
+    "crowd_last", "crowd_next", "players_spread",
 )
 VISIBLE_FEATURES = (
     "log_ball_speed", "ball_speed_unknown", "ball_still", "ball_still_at_spot", "at_spot",
@@ -70,6 +81,7 @@ VISIBLE_FEATURES = (
     "players_speed_w1", "players_speed_w4", "players_speed_w12", "players_slow_w4",
 )
 PARTS = {"gap": GAP_FEATURES, "visible": VISIBLE_FEATURES}
+READABLE = {2: {"gap": GAP_FEATURES_V2, "visible": VISIBLE_FEATURES}, 3: PARTS}
 
 
 # --- config ------------------------------------------------------------------------------------
@@ -160,6 +172,7 @@ def build_inputs(data, section, players=None):
         "at_spot": deadball.restart_spot(data.ball_xy, data.pitch, section),
         "out_margin": float(section["out_margin"]),
         "gap_runs": deadball.gap_runs(np.isnan(data.ball_xy[:, 0]), data.period),
+        "players_xy": np.asarray(data.players_xy, dtype=float),
         **players,
     }
 
@@ -234,8 +247,49 @@ def _speed_near(speed, start, step, frames, period):
     return float("nan")
 
 
+def _side_mean(values, period, frames, forward):
+    """Mean of the finite values in the next (forward) or last `frames` frames, inside one
+    period, not counting the frame itself; 0 if none."""
+    values = np.asarray(values, dtype=float)
+    out = np.zeros(len(values))
+    for first, stop in _segments(period):
+        part = values[first:stop]
+        finite = np.isfinite(part)
+        sums = np.concatenate(([0.0], np.cumsum(np.where(finite, part, 0.0))))
+        counts = np.concatenate(([0.0], np.cumsum(finite.astype(float))))
+        index = np.arange(stop - first)
+        if forward:
+            low, high = index + 1, np.minimum(index + 1 + frames, stop - first)
+        else:
+            low, high = np.maximum(index - frames, 0), index
+        low = np.minimum(low, high)
+        total, count = sums[high] - sums[low], counts[high] - counts[low]
+        out[first:stop] = np.where(count > 0, total / np.maximum(count, 1.0), 0.0)
+    return out
+
+
+def _crowd(players_xy, point):
+    """float[k]: share of the seen players within CROWD_M of one point, per frame."""
+    d = np.hypot(players_xy[..., 0] - point[0], players_xy[..., 1] - point[1])
+    seen = np.isfinite(d).sum(axis=1)
+    with np.errstate(invalid="ignore"):
+        near = (d < CROWD_M).sum(axis=1)
+    return np.where(seen > 0, near / np.maximum(seen, 1), 0.0)
+
+
+def _spread(players_xy):
+    """float[n]: log1p of the typical distance (m) of all players from their centre; 0 if < 3."""
+    seen = np.isfinite(players_xy[..., 0])
+    count = seen.sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        centre = np.where(seen[..., None], players_xy, 0.0).sum(axis=1) / count[:, None]
+        sq = np.where(seen, np.sum((players_xy - centre[:, None, :]) ** 2, axis=2), 0.0)
+        spread = np.sqrt(sq.sum(axis=1) / count)
+    return np.where(count >= 3, np.log1p(spread), 0.0)
+
+
 def frame_features(inp):
-    """Features of every frame. Returns (in_gap bool[n], gap_x float[n, 12], vis_x float[n, 13]).
+    """Features of every frame. Returns (in_gap bool[n], gap_x float[n, 20], vis_x float[n, 13]).
 
     gap_x is meaningful on gap frames, vis_x on frames where the ball is seen; the other rows
     are zeros. Column names: GAP_FEATURES and VISIBLE_FEATURES.
@@ -276,6 +330,13 @@ def frame_features(inp):
     gap = np.zeros((n, len(GAP_FEATURES)))
     gap[:, 8:11] = np.column_stack(speed_windows)
     gap[:, 11] = slow_share
+    trend = round(TREND_S * fps)
+    log_speed = np.log1p(np.asarray(inp["player_speed"], dtype=float))
+    gap[:, 16] = (_side_mean(log_speed, period, trend, True)
+                  - _side_mean(log_speed, period, trend, False))
+    players = inp.get("players_xy")
+    if players is not None:
+        gap[:, 19] = centred_mean(_spread(players), period, round(SPREAD_WINDOW_S * fps))
     look = round(SPEED_LOOK_S * fps)
     for first, stop in inp["gap_runs"]:
         before = first > 0 and period[first - 1] == period[first]
@@ -294,6 +355,16 @@ def frame_features(inp):
                 gap[first:stop, 6] = np.log1p(min(nxt, SPEED_CAP))
         gap[first:stop, 4] = not (before and after)
         gap[first:stop, 7] = inp["slow_players"][first:stop].mean()
+        k = np.arange(stop - first)
+        since, until = (k + 1) / fps, (stop - first - k) / fps
+        gap[first:stop, 12] = np.log1p(since)
+        gap[first:stop, 13] = np.log1p(until)
+        gap[first:stop, 14] = gap[first, 1] * np.exp(-since / EDGE_DECAY_S)
+        gap[first:stop, 15] = max(gap[first, 2], gap[first, 3]) * np.exp(-until / EDGE_DECAY_S)
+        if players is not None and before:
+            gap[first:stop, 17] = _crowd(players[first:stop], xy[first - 1])
+        if players is not None and after:
+            gap[first:stop, 18] = _crowd(players[first:stop], xy[stop])
     gap[~in_gap] = 0.0
     return in_gap, gap, vis
 
@@ -454,11 +525,11 @@ def load_model(path):
         raise FileNotFoundError(f"learned dead-ball model not found: {path} "
                                 "(make it with scripts/fit_deadball.py)")
     doc = json.loads(path.read_text())
-    if doc.get("format") != FORMAT or doc.get("version") != VERSION:
-        raise ValueError(f"{path}: not a version {VERSION} {FORMAT} file")
+    if doc.get("format") != FORMAT or doc.get("version") not in READABLE:
+        raise ValueError(f"{path}: not a version {'/'.join(map(str, READABLE))} {FORMAT} file")
     if doc.get("windows_s") != list(WINDOWS_S):
         raise ValueError(f"{path}: made with other player-speed windows, refit it")
-    for name, features in PARTS.items():
+    for name, features in READABLE[doc["version"]].items():
         part = doc.get(name)
         if not isinstance(part, dict) or part.get("features") != list(features):
             raise ValueError(f"{path}: the {name} part was made for other features, refit it")
@@ -485,7 +556,8 @@ def score(data, section, repo_root=None):
     model = load_model(model_path(section, repo_root))
     in_gap, gap_x, vis_x = frame_features(build_inputs(data, section))
     out = np.zeros(len(in_gap))
-    out[in_gap] = predict_proba(model["gap"], gap_x[in_gap]) if in_gap.any() else 0.0
+    k = len(model["gap"]["features"])           # a v2 file uses the first 12 gap columns
+    out[in_gap] = predict_proba(model["gap"], gap_x[in_gap][:, :k]) if in_gap.any() else 0.0
     seen = ~in_gap
     if section["learned"].get("visible", True) and seen.any():
         out[seen] = predict_proba(model["visible"], vis_x[seen])   # visible: false leaves 0 here

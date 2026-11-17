@@ -403,3 +403,64 @@ def test_fit_folds_makes_one_model_per_match_and_one_for_all_and_the_holdout_bea
 def test_fit_folds_needs_a_match_to_hold_out():
     with pytest.raises(ValueError, match="at least two"):
         ld.fit_folds({"A": rows_for(1)})
+
+
+# --- v3 gap features -----------------------------------------------------------------------------
+
+
+def test_time_in_the_gap_and_the_edge_clues_fade_away_from_their_edge():
+    n = 1000
+    ball = np.tile(np.array([50.0, 30.0]), (n, 1))
+    ball[199] = (50.0, 0.2)                     # the ball left at the touchline
+    ball[700] = (52.5, 34.0)                    # and comes back at the centre spot
+    inp = inputs(n, gaps=[(200, 700)], ball=ball)
+    _, gap_x, _ = ld.frame_features(inp)
+    f = ld.GAP_FEATURES
+    early, late = gap_x[205], gap_x[695]
+    assert early[column(f, "log_since_s")] < late[column(f, "log_since_s")]
+    assert early[column(f, "log_until_s")] > late[column(f, "log_until_s")]
+    assert early[column(f, "last_line_early")] > late[column(f, "last_line_early")]
+    assert late[column(f, "next_restart_late")] > early[column(f, "next_restart_late")]
+
+
+def test_the_speed_trend_sees_players_stop_and_start():
+    speed = np.concatenate([np.full(300, 6.0), np.full(400, 0.2), np.full(300, 6.0)])
+    inp = inputs(1000, gaps=[(100, 900)], player_speed=speed)
+    _, gap_x, _ = ld.frame_features(inp)
+    trend = column(ld.GAP_FEATURES, "speed_trend")
+    assert gap_x[300, trend] < -1.0 and gap_x[700, trend] > 1.0 and abs(gap_x[500, trend]) < 1e-9
+
+
+def test_the_crowd_counts_players_near_where_the_ball_comes_back():
+    n, players = 600, 10
+    inp = inputs(n, gaps=[(100, 500)])
+    xy = np.full((n, players, 2), 80.0)
+    xy[:, :4] = (50.0, 30.0)                    # 4 of 10 next to the ball's spot
+    inp["players_xy"] = xy
+    _, gap_x, _ = ld.frame_features(inp)
+    f = ld.GAP_FEATURES
+    assert gap_x[300, column(f, "crowd_next")] == 0.4
+    assert gap_x[300, column(f, "crowd_last")] == 0.4
+    assert gap_x[300, column(f, "players_spread")] > 0.0
+    assert not gap_x[50].any()                  # still zero outside the gap
+
+
+def test_a_v2_model_file_still_loads_and_scores_with_the_first_twelve_columns(tmp_path):
+    path = tmp_path / "m.json"
+    fits = toy_fits()
+    ld.save_model(path, fits, ["A"], 10.0, {"gap": 1, "visible": 1})
+    doc = json.loads(path.read_text())
+    k = len(ld.GAP_FEATURES_V2)
+    doc["version"] = 2
+    doc["gap"].update(features=list(ld.GAP_FEATURES_V2), mean=doc["gap"]["mean"][:k],
+                      scale=doc["gap"]["scale"][:k], coef=doc["gap"]["coef"][:k])
+    path.write_text(json.dumps(doc))
+    assert ld.load_model(path)["version"] == 2
+    doc["gap"]["features"] = list(ld.GAP_FEATURES)          # v2 with v3 features: refused
+    path.write_text(json.dumps(doc))
+    try:
+        ld.load_model(path)
+    except ValueError as err:
+        assert "other features" in str(err)
+    else:
+        raise AssertionError("a v2 file with v3 features was accepted")

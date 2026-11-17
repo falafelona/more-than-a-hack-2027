@@ -1,0 +1,91 @@
+# Dev set from other matches (task N5, issue #23): which matches, and how the ball is degraded.
+# Read by scripts/devset_eval.py. Not a pipeline config: the pipeline configs are
+# configs/baseline.yaml and configs/exp/*.yaml, and are passed with --config.
+#
+# Data: IDSSE (Bassek et al., Scientific Data 12, 195, 2025), approved by the organisers in
+# official issue #16 (D15). Files live OUTSIDE the repo, in the folder IDSSE_DATA_DIR points at.
+seed: 0
+
+matches:                  # the seven full matches of the open IDSSE release (ids as in the file names)
+  - J03WPY
+  - J03WMX
+  - J03WN1
+  - J03WOH
+  - J03WOY
+  - J03WQQ
+  - J03WR9
+
+# The ball of IDSSE is almost complete, ours is not. These numbers make the dev ball look like
+# ours. They come from the ball EDA of OUR match (scripts/ball_eda.py, issue #13, run 2026-11-12).
+# They describe our match only; they are not tuned on it (D9, D15).
+#
+# What the EDA showed: the ball is missing on 40.7% of the graded frames, and 99% of the missing
+# frames are in 131 gaps longer than 5 s (median gap 10.7 s, longest 221 s). Only 16 gaps are
+# shorter than 1 s and together they hold about 0.1% of the missing frames. So methods that fill
+# short gaps (interpolate, kalman) can touch very little of our ball.
+degrade:
+  missing_share: 0.407    # EDA: ball missing on 64,643 of 158,857 graded frames (40.7%)
+  # Where the gaps go. random: anywhere, so on dead ball only as often as by chance (about 44%
+  # on IDSSE), like occlusions in open play. stoppage: each gap starts as one dead-ball spell of
+  # the IDSSE truth starts (the ball lost as it goes out). Our real gaps are a mix (dead-ball
+  # EDA, #28), so the two bracket the truth. Run both (--gaps stoppage, or
+  # make devset GAPS=stoppage): a change goes into final.yaml only if it wins under both.
+  # random stays the default so the earlier RESULTS.md rows reproduce exactly.
+  placement: random
+  # With stoppage: a gap starts 0 to this many seconds before the ball goes dead and runs on
+  # from there. Our gaps tend to start as the ball reaches a line (dead-ball EDA #28: 32% of gaps
+  # start within 2 m of a line, against 9% of seen frames), so they start with the stoppage.
+  stoppage_lead_s: 1.0
+  # Our provider smooths the ball track: a kick's sharp turn comes out rounded. Smoothing the
+  # IDSSE ball with a Gaussian of this sigma (s) before the gaps are cut makes it look like ours
+  # on the touch numbers (team_diag.py --smooth-ball: 0.25 s matches the nearest player at a
+  # velocity-change peak, 1.66 vs 1.75 m, the clear-toucher share and the ball/players time
+  # shift). 0 = off, which keeps the earlier RESULTS.md rows reproducible; set 0.25 (or use
+  # --devset with a copy) for the realistic dev set.
+  ball_smooth_s: 0.25
+  gaps:                   # each bin's share of the MISSING frames (adds up to 1)
+    # Gaps up to 5 s: the EDA bins. The three shortest hold under 0.05% each, so only a rough
+    # size is known (13, 2 and 1 gaps); the shares below are about the right count of frames.
+    - {min_s: 0.0, max_s: 0.2,  share: 0.0006}  # up to 0.2 s  (13 gaps)
+    - {min_s: 0.2, max_s: 0.5,  share: 0.0003}  # 0.2-0.5 s    (2 gaps)
+    - {min_s: 0.5, max_s: 1.0,  share: 0.0003}  # 0.5-1 s      (1 gap)
+    - {min_s: 1.0, max_s: 2.0,  share: 0.0}     # 1-2 s        (0 gaps)
+    - {min_s: 2.0, max_s: 5.0,  share: 0.0}     # 2-5 s        (0 gaps)
+    # Gaps over 5 s hold 99.0% of the missing frames, plus the 0.9% in the 3 gaps at a half edge.
+    # The EDA gives only the gap-length quantiles (p25 6.1 s, p50 10.7 s, p75 21.2 s, p95 51.1 s,
+    # p99 138.6 s, max 221.5 s), so this bin is split at those quantiles and the shares are an
+    # estimate of the frames in each piece (about 0.1 uncertainty), not EDA numbers.
+    - {min_s: 5.0,   max_s: 10.72, share: 0.1575}
+    - {min_s: 10.72, max_s: 21.16, share: 0.2069}
+    - {min_s: 21.16, max_s: 51.12, share: 0.3759}
+    - {min_s: 51.12, max_s: 221.5, share: 0.2585}
+  false_detections:       # wrong ball positions for the `reject` method; 0 = none
+    share: 0.0            # 0 for now: the EDA's jump share (0.46% of moves above 30 m/s) and 4.19% of seen positions
+                          # outside the pitch (many are real: the ball out of play) do not say how many are wrong
+    min_s: 0.04           # shortest wrong stretch (s)
+    max_s: 0.2            # longest wrong stretch (s)
+
+# Simulated Smart Tagging restarts (review finding 2), used only with --tags (make devset TAGS=1).
+# IDSSE has no Smart Tagging, so without them every tag clue gives 0 on the dev set. Each match
+# gets restart tags made from its own truth (devset.simulate_tags): one at the end of a dead-ball
+# spell, typed by where the ball is when play restarts, as many per graded frame as on our match.
+# Assumptions (so a win with tags is weaker evidence): types always right, no false tags, and the
+# tag starts as the restart is taken. Off by default, so the earlier RESULTS.md rows reproduce.
+tags:
+  our_counts:             # restarts per type on OUR match (dead-ball EDA, #28: 58 in all)
+    throw-in: 26
+    corner kick: 12
+    goal kick: 10
+    free kick: 5
+    kick off (after goal): 5
+  our_graded_frames: 158857   # graded frames of our match (ball EDA, #13): the counts above per this
+  min_dead_s: 1.0         # a dead-ball spell shorter than this is not taken as a restart
+  offset_s: [-1.0, 1.0]   # tag start = the first live frame after the spell + a uniform offset (s).
+                          # NOT measured on our match: change it if a human-run EDA measures it
+  # The restart type, from where the ball is when play restarts (metres; the dev match's pitch)
+  centre_m: 3.0           # this close to the centre spot: kick off (after goal)
+  corner_m: 3.0           # this close to a goal line AND a touchline: corner kick
+  touchline_m: 2.0        # this close to a touchline, or past it: throw-in
+  goal_area_m: 7.0        # this close to a goal line (goal area 5.5 m, plus slack) ...
+  goal_area_half_width_m: 11.0   # ... and this close to the middle (goal area 9.16 m): goal kick
+                          # anywhere else: free kick

@@ -1,23 +1,11 @@
-# The configuration we submit. Organisers' deadline: Tue 17 Nov 23:59 CET. The team locks it on
-# Sun 15 or Mon 16 Nov (tag v1.0-freeze).
-# Changes only via a PR with a row in experiments/RESULTS.md.
-# Now: a copy of configs/exp/poss-place-late.yaml: the #45 config (graded dead score with
-# gap_chance and the restart tags, H / A / D HMM with the evidence lag and the fast-ball rule) plus
-# the still-ball clue in the dead score and the restart-taker evidence. Dev set vs the #45 config,
-# better on 7/7 matches in every run: seed 0 +0.080 / +0.042 (random / stoppage cuts), +0.060 with
-# tags; seed 1 +0.080 / +0.044.
-# Then + switch_placement 0.75 (configs/exp/poss-place-late.yaml, #49): vs best-still-ball-restart.yaml,
-# better on 7/7 matches in every run: +0.022 / +0.027 (seed 0 random / stoppage), +0.025 / +0.026
-# (seed 1); the same +0.023 / +0.027 with the still-ball clue off.
-# Then + touch evidence (configs/exp/poss-touch-best.yaml, feat/poss-touch-evidence): vs the
-# placement config, better on 7/7 matches in all four runs: +0.056 / +0.060 (seed 0 random /
-# stoppage), +0.055 / +0.055 (seed 1, never used for tuning). Our match: D unchanged, 1,935 frames
-# H <-> A, possessions 455 -> 501 in the graded halves.
-# Then the dead score blends gap_chance (x 0.3) with the learned score of #54 v2 (x 0.7), model
-# trained on stoppage gaps and fitted on all 7 IDSSE matches (= configs/exp/poss-blend-learned70-
-# stopmodel-final.yaml). Dev set (leave-one-match-out models) vs the touch config: +0.040 / +0.023
-# (seed 0 random / stoppage), +0.037 / +0.022 (seed 1), better on 27 of 28 match-runs. Fails the
-# +0.04 rule on stoppage cuts: exception taken (RESULTS.md). Our match: graded D 43.5% -> 44.7%.
+# The configuration we submit. Changes only via a PR with a row in experiments/RESULTS.md.
+# = configs/exp/poss-touch-hold2.0-final.yaml: the v1.2 release (touch evidence + dead-score blend)
+# with decoder costs 10 / 18 / 18, evidence_lag 24, switch_placement 1.0, touch distance 4.0 m,
+# the learned gap team model v5 (gaps only), min_spell_s 1.0, dead-ball model v3 and the learned
+# touch model with hold 2.0 s. Learned models are fitted on all 7 IDSSE dev matches.
+# Dev set vs v1.2 (leave-one-match-out models, seeds 0 and 1, random and stoppage gaps): +0.049 to
+# +0.067 spellF1 on the original dev set, +0.096 to +0.111 on the smoothed one, better on 6 or 7
+# of 7 matches in every run. Per-step numbers: experiments/RESULTS.md.
 seed: 0
 
 ball:
@@ -33,8 +21,8 @@ deadball:
     out_of_bounds: 1.0    # strongest clue: enough on its own
     before_restart: 0.6   # enough on its own: before a tagged restart the ball is dead, even if players move
     gap_chance: 0.3       # a chance (0-1) inside each ball gap, 0 where the ball is seen; x 0.3 + learned x 0.7 = a weighted average
-    still_ball_at_spot: 0.6   # NEW: a seen ball standing still at a restart spot (free kick, throw-in, goal kick set up)
-    learned: 0.7          # NEW: per-frame chance from the #54 model (learned_dead.py), blended with gap_chance
+    still_ball_at_spot: 0.6   # a seen ball standing still at a restart spot (free kick, throw-in, goal kick set up)
+    learned: 0.7          # per-frame chance from the #54 model (learned_dead.py), blended with gap_chance
   out_margin: 1.0         # metres past the line before we call it out
   still_speed: 1.0        # m/s: players' median speed below this counts as standing (gap clue players_still)
   speed:                  # player speed from positions (velocity.player_speed); the ATD speed field is not used
@@ -42,13 +30,13 @@ deadball:
     min_points: 5         # seen positions needed in that window
     min_each_side: 2      # seen positions needed before AND after the frame
     max_speed: 12.0       # m/s, above any sprint: a bigger jump is a tracklet swap, so the track is cut there
-  still_ball_speed: 0.5   # NEW: m/s, a seen ball slower than this counts as standing still
-  still_ball_seconds: 2.0 # NEW: s it must stand still in a row (a short stop in open play does not count)
-  spot_line_m: 2.0        # NEW: m from a touchline or goal line (throw-in, corner); same as gap.line_distance
-  spot_centre_m: 3.0      # NEW: m from the centre spot (kickoff); same as gap.spot_distance
-  goal_area_depth_m: 5.5  # NEW: goal area (goal kick), laws of the game
+  still_ball_speed: 0.5   # m/s, a seen ball slower than this counts as standing still
+  still_ball_seconds: 2.0 # s it must stand still in a row (a short stop in open play does not count)
+  spot_line_m: 2.0        # m from a touchline or goal line (throw-in, corner); same as gap.line_distance
+  spot_centre_m: 3.0      # m from the centre spot (kickoff); same as gap.spot_distance
+  goal_area_depth_m: 5.5  # goal area (goal kick), laws of the game
   goal_area_half_width_m: 9.16
-  ball_speed:             # NEW: ball speed from positions for the still-ball clue (velocity.ball_velocity)
+  ball_speed:             # ball speed from positions for the still-ball clue (velocity.ball_velocity)
     half_window_s: 0.2    # s on each side of the frame: wider than for fast balls, so jitter averages out
     min_points: 5
     min_each_side: 2
@@ -70,8 +58,8 @@ deadball:
     goal kick: 20
     free kick: 25
     kick off (after goal): 45   # includes the celebration
-  learned:                # NEW: the fitted per-frame model (learned_dead.py); weight in `weights`
-    model: models/deadball_stoppage_all.json   # v2, trained on stoppage gaps, all 7 IDSSE matches
+  learned:                # the fitted per-frame model (learned_dead.py); weight in `weights`
+    model: models/deadball_stoppage3_all.json  # v3: v2 + 8 gap features, trained on stoppage gaps, all 7 IDSSE matches
 
 possession:
   method: hmm
@@ -80,20 +68,28 @@ possession:
   margin_scale: 1.0       # m: a 3 m margin is about 95% sure
   near_distance: 5.0      # m: nearest player this far away = no evidence
   dead_weight: 2.0        # how strongly the dead score pulls towards D (and away from H / A)
-  switch_cost: 3.5        # cost of a change between H and A (was 7; the fast-ball rule removes fake switches)
-  to_dead_cost: 6.0       # cost of going from H or A into D
-  from_dead_cost: 6.0     # cost of leaving D for H or A
-  evidence_lag: 12        # frames (0.5 s): H / A evidence moved later; the receiver nears the ball before touching it
+  switch_cost: 10         # cost of a change between H and A (was 3.5; cost sweep, scripts/cost_sweep.py)
+  to_dead_cost: 18        # cost of going from H or A into D (was 6)
+  from_dead_cost: 18      # cost of leaving D for H or A (was 6)
+  evidence_lag: 24        # frames (0.96 s): H / A evidence moved later (was 18; chosen on the smoothed dev set)
   fast_ball_speed: 12     # m/s: no H / A evidence while the ball moves faster (pass or shot)
-  switch_placement: 0.75  # NEW: H / A switches placed 75% into their no-evidence stretch (Viterbi puts them at the earliest frame)
-  touch:                  # NEW: a sharp change of the ball's velocity = the nearest player touched it
+  switch_placement: 1.0   # H / A switches placed at the end of their no-evidence stretch (was 0.75; timing sweep)
+  min_spell_s: 1.0        # an H / A spell shorter than this between two spells of the other team joins them (not next to D)
+  learned:                # learned gap team model (learned_team.py v5), added on top of the margin evidence
+    model: models/team_smooth5g_all.json   # v5: team width, length, back-line height at the gap edges; all 7 IDSSE matches
+    add_cost: 0.25        # x log-odds; higher over-trusts an ~83% model (dev set)
+    where: gaps           # only frames with the ball missing; with the ball seen, margin and touches are better
+  touch:                  # a sharp change of the ball's velocity = the nearest player touched it
     offset_s: 0.12        # s: velocity before vs after, this far either side of the frame
     min_change: 3.0       # m/s: change of velocity (direction or speed) that counts as a touch
-    distance: 2.0         # m: the toucher must be this close to the ball
+    distance: 4.0         # m: the toucher must be this close to the ball (was 2.0; smoothed dev set)
     margin: 0.1           # m: and the other team's nearest this much further (else a duel: no evidence)
-    hold_s: 0.8           # s from the touch on that get the evidence (not moved by evidence_lag)
+    hold_s: 2.0           # s from the touch on that get the evidence (was 0.8; not moved by evidence_lag)
     cost: 2.0             # per frame on the other team (team_cost 0.5 = about one frame of full margin)
-  restart:                # NEW: the team near the ball where a dead spell ends takes the restart
+  touch_learned:          # the team of each touch from the learned touch model (learned_touch.py), not the nearest player
+    model: models/touch_all.json   # ridge logistic, 20 features, all 7 IDSSE matches
+    cost: 2.0             # x |log-odds| on the losing team for touch.hold_s after each touch
+  restart:                # the team near the ball where a dead spell ends takes the restart
     threshold: 0.5        # dead score at or above this is dead
     min_dead_s: 3.0       # s: only real stoppages, not a short dip in the dead score
     look_s: 2.0           # s on each side of the end: who is nearest the ball most often
