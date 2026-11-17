@@ -89,3 +89,15 @@ def test_final_is_cost_timing_with_wider_touch_and_longer_lag():
     old["possession"]["evidence_lag"] = 24
     old["possession"]["touch"]["distance"] = 4.0
     assert final == old
+
+
+def test_final_is_the_learned_touch_config_with_hold_2():
+    """final.yaml (with its comments) = poss-touch-hold2.0-final.yaml, which is the learned-touch
+    step (poss-touch-final.yaml) with touch.hold_s 2.0; a sweep tool cannot silently rewrite it."""
+    final = load_config(CONFIGS / "final.yaml")
+    assert final == load_config(CONFIGS / "exp" / "poss-touch-hold2.0-final.yaml")
+    assert final["possession"]["touch"].pop("hold_s") == 2.0
+    step = load_config(CONFIGS / "exp" / "poss-touch-final.yaml")
+    assert step["possession"]["touch"].pop("hold_s") == 0.8
+    assert final == step
+    assert "SWEEP" not in (CONFIGS / "final.yaml").read_text()
