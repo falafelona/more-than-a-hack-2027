@@ -57,7 +57,15 @@ from pathlib import Path
 
 import numpy as np
 
-from falafelona import deadball, learned_dead, possession, vendor
+from falafelona import (
+    deadball,
+    learned_dead,
+    learned_switch,
+    learned_team,
+    learned_touch,
+    possession,
+    vendor,
+)
 from falafelona.ball import DataCleaner
 from falafelona.io import Event, Match, read_cache, write_cache
 from falafelona.pipeline import apply_x_policy
@@ -93,9 +101,21 @@ PAIRED_EXTRA = ("spell_precision", "spell_recall", "alive_dead_f1", "team_acc", 
 #   dead       every frame
 #   dead_gaps  only frames where the cleaned ball is missing
 #   dead_seen  only frames where the cleaned ball is seen
-ORACLES = ("dead", "dead_gaps", "dead_seen")
+#   switch     NOT the dead score: inside the cleaned ball's gaps, the H <-> A switch cost drops to
+#              ORACLE_SWITCH_COST within +/- 0.5 s of every true change of team (a perfect
+#              learned_switch hazard). Says whether knowing WHEN possession changes in a gap helps.
+#   team_gaps  NOT the dead score: inside the cleaned ball's gaps, the true team gets extra
+#              evidence (ORACLE_TEAM_COST per frame on the other team). A perfect gap team model.
+#   touch_team NOT the dead score: the touches we detect get the TRUE team (the truth just after
+#              the touch) instead of the nearest-player rule. Is our touch team call the problem?
+#   touch_all  as touch_team, plus a touch at every true change of team where the ball is seen.
+#              A perfect touch detector: is missing touches the problem?
+ORACLES = ("dead", "dead_gaps", "dead_seen", "switch", "team_gaps", "touch_team", "touch_all")
+DEAD_ORACLES = ("dead", "dead_gaps", "dead_seen")
+ORACLE_SWITCH_COST = 2.0
+ORACLE_TOUCH_AFTER_S = 0.3        # the truth this long after a touch says who touched it
+ORACLE_TEAM_COST = 2.0
 ORACLE_TAG = " + oracle "         # report name: "<config> + oracle <mode>"
-
 
 @dataclass
 class DevMatch:
@@ -421,7 +441,32 @@ def load_idsse(match_id, root=None, pitch=None, origin="auto", pad=HALFTIME_PAD,
 
 
 # --- degrading the ball track ------------------------------------------------------------------
+def smooth_ball(xy, period, sigma):
+    """Gaussian-smoothed ball positions (sigma in frames), inside each period and each seen run.
 
+    Normalised convolution: missing frames do not count and stay missing, and nothing is mixed
+    across a half or a gap. sigma 0 returns the positions unchanged. Frames outside the graded
+    halves (period 0) are left as they are.
+    """
+    xy = np.asarray(xy, dtype=float)
+    if sigma <= 0:
+        return xy.copy()
+    period = np.asarray(period)
+    half = int(np.ceil(3 * sigma))
+    kernel = np.exp(-0.5 * (np.arange(-half, half + 1) / sigma) ** 2)
+    out = xy.copy()
+    runs = np.isfinite(xy[:, 0]) & (period > 0)
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], runs.astype(np.int8), [0]))))
+    for first, stop in zip(edges[0::2], edges[1::2], strict=True):
+        cut = np.flatnonzero(np.diff(period[first:stop])) + 1
+        for a, b in zip([0, *cut], [*cut, stop - first], strict=True):
+            part = xy[first + a:first + b]
+            size = len(part)
+            weight = np.convolve(np.ones(size), kernel)[half:half + size]   # works for any size
+            for k in (0, 1):
+                out[first + a:first + b, k] = np.convolve(part[:, k], kernel)[half:half + size] \
+                    / weight
+    return out
 
 def _degrade_settings(section, fps):
     """Check the `degrade:` section of configs/devset.yaml. Returns plain numbers."""
@@ -463,8 +508,14 @@ def _degrade_settings(section, fps):
     fault_high = int(np.floor(faults.get("max_s", 0.2) * fps + 1e-9))
     if fault_share and fault_high < fault_low:
         raise ValueError("devset config: false_detections holds no whole frame")
+    smooth_s = section.get("ball_smooth_s", 0.0)
+    if isinstance(smooth_s, bool) or not isinstance(smooth_s, (int, float)) or smooth_s < 0:
+        raise ValueError(f"devset config: degrade.ball_smooth_s must be 0 or more seconds, "
+                         f"got {smooth_s!r}")
     return {
         "missing_share": float(share),
+        "smooth_s": float(smooth_s),
+        "smooth": float(smooth_s) * fps,
         "placement": placement,
         "stoppage_lead": stoppage_lead,
         "bins": bins,
@@ -542,6 +593,10 @@ def _place_on_stoppage(rng, stoppages, blocked, length, lead, tries=200):
 def degrade_ball(match, section, seed, truth=None):
     """A copy of `match` whose ball track looks like ours. Returns (new_match, report).
 
+        Step 0 (only if ball_smooth_s > 0): the ball is smoothed with a Gaussian of that sigma in
+    seconds (smooth_ball), because our provider's ball track is smoothed: a kick's sharp turn
+    comes out rounded, about 1.5 m from the foot (team_diag.py --smooth-ball: 0.25 s matches our
+    match on the touch distance, the clear-toucher share and the ball/players time shift).
     Step 1 (only if false_detections.share > 0): short stretches of seen frames get a wrong
     position, one fixed random point on the pitch per stretch, like a detector locked onto the
     wrong object. These are what the `reject` ball method is for.
@@ -566,10 +621,10 @@ def degrade_ball(match, section, seed, truth=None):
     rng = np.random.default_rng(seed)
     ranges = _half_ranges(match.period)
     graded = int(sum(stop - start for start, stop in ranges))
-    ball_xy = match.ball_xy.copy()
+    ball_xy = smooth_ball(match.ball_xy, match.period, settings["smooth"])
     ball_speed = match.ball_speed.copy()
     report = {"placement": settings["placement"], "false_stretches": 0, "gaps_placed": 0,
-              "gaps_unplaced": 0, "gaps_off_stoppage": 0}
+              "gaps_unplaced": 0, "gaps_off_stoppage": 0, "ball_smooth_s": settings["smooth_s"]}
     if not graded:
         return match, {**report, "missing_share": None}
 
@@ -1084,8 +1139,9 @@ def oracle_dead_score(dead_score, truth, ball_missing, mode):
     1.0 where the truth is D, 0.0 where it is H or A; truth X and frames outside the mode keep
     our own score. ball_missing: bool[n], True where the CLEANED ball is missing.
     """
-    if mode not in ORACLES:
-        raise ValueError(f"unknown oracle '{mode}', expected one of {', '.join(ORACLES)}")
+    if mode not in DEAD_ORACLES:
+        raise ValueError(f"unknown oracle '{mode}' for the dead score, expected one of "
+                         f"{', '.join(DEAD_ORACLES)}")
     truth = np.asarray(truth)
     missing = np.asarray(ball_missing, dtype=bool)
     if truth.shape != missing.shape or len(truth) != len(dead_score):
@@ -1096,6 +1152,62 @@ def oracle_dead_score(dead_score, truth, ball_missing, mode):
     out[where] = (truth[where] == "D").astype(np.float64)
     return out
 
+def oracle_switch_cfg(cfg, truth, ball_missing, period, fps):
+    """cfg with a per-frame H <-> A switch cost from the truth (oracle "switch"): the config's
+    switch_cost everywhere, ORACLE_SWITCH_COST on gap frames near a true change of team.
+    Handed to possession through a private key that no YAML file can set."""
+    section = cfg["possession"]
+    if "switch_cost" not in section:
+        raise ValueError("oracle 'switch' needs a possession method with a switch_cost")
+    near = learned_switch.switch_target(truth, period, fps) & np.asarray(ball_missing, dtype=bool)
+    base = float(section["switch_cost"])
+    costs = np.where(near, min(ORACLE_SWITCH_COST, base), base)
+    return {**cfg, "possession": {**section, "_oracle_team_switch": costs}}
+
+def oracle_team_cfg(cfg, truth, ball_missing):
+    """cfg with extra H / A costs from the truth inside gaps (oracle "team_gaps"): on gap frames
+    whose truth is H the A state costs ORACLE_TEAM_COST more, and the other way round. D and X
+    frames get nothing. Handed to possession through a private key no YAML file can set."""
+    truth = np.asarray(truth)
+    missing = np.asarray(ball_missing, dtype=bool)
+    extra = np.zeros((len(truth), 2))
+    extra[missing & (truth == "H"), 1] = ORACLE_TEAM_COST     # against A
+    extra[missing & (truth == "A"), 0] = ORACLE_TEAM_COST     # against H
+    return {**cfg, "possession": {**cfg["possession"], "_oracle_team_extra": extra}}
+
+def team_changes(truth, period):
+    """bool[n]: frames where the last team (H / A, carried over D and X inside a half) changes."""
+    truth, period = np.asarray(truth), np.asarray(period)
+    change = np.zeros(len(truth), dtype=bool)
+    last, last_period = "", None
+    for i, label in enumerate(truth):
+        if period[i] != last_period:
+            last, last_period = "", period[i]
+        if label in ("H", "A"):
+            change[i] = bool(last) and label != last
+            last = label
+    return change
+
+
+def oracle_touch_cfg(cfg, cleaned, truth, mode):
+    """cfg whose touch evidence uses the truth (oracles "touch_team" and "touch_all"): the
+    detected touches get the true team; "touch_all" also adds a touch at every true change of
+    team where the cleaned ball is seen. Needs a possession.touch block. Private key, dev only."""
+    section = cfg["possession"]
+    events = possession.touch_events(cleaned, section)
+    if events is None:
+        raise ValueError(f"oracle '{mode}' needs a possession.touch block")
+    truth = np.asarray(truth)
+    n = len(truth)
+    touches = np.asarray(events[0], dtype=np.int64)
+    if mode == "touch_all":
+        seen = np.isfinite(cleaned.ball_xy[:, 0])
+        touches = np.union1d(touches, np.flatnonzero(team_changes(truth, cleaned.period) & seen))
+    after = np.minimum(touches + round(ORACLE_TOUCH_AFTER_S * cleaned.fps), n - 1)
+    label = truth[after]
+    teams = np.where(label == "H", possession.H_STATE,
+                     np.where(label == "A", possession.A_STATE, -1))
+    return {**cfg, "possession": {**section, "_oracle_touch_events": (touches, teams)}}
 
 def oracle_name(name, mode):
     """The report name of config `name` run with oracle `mode`."""
@@ -1111,8 +1223,9 @@ def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0, tags=Fals
     tags: give every match simulated restart tags (simulate_tags, dev_cfg["tags"]). They are
     drawn with their own seed, so the degraded ball is the same with or without them.
     oracles: modes from ORACLES. Each config is also run once per mode, with the dead score
-    replaced by the truth where the mode says (oracle_dead_score), on the same cut ball, and
-    scored as "<config> + oracle <mode>". Without oracles the result is exactly as before.
+    replaced by the truth where the mode says (oracle_dead_score), or for "switch" with the true
+    switch times inside gaps (oracle_switch_cfg), on the same cut ball, and scored as
+    "<config> + oracle <mode>". Without oracles the result is exactly as before.
     Returns {"matches": {id: {"ball_missing": share, **report}}, "scores": {name: {id: score}}},
     plus "oracle_of": {oracle name: config name} when oracles were asked for, and
     "diagnosis": {name: {id: spell_diagnosis}} when diagnose is True.
@@ -1149,6 +1262,9 @@ def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0, tags=Fals
         prepared = {}  # stage key -> stages, for this match only
         for name, cfg in configs.items():
             cfg = learned_dead.for_match(cfg, dev.match_id)   # leave-one-match-out model paths
+            cfg = learned_team.for_match(cfg, dev.match_id)
+            cfg = learned_switch.for_match(cfg, dev.match_id)
+            cfg = learned_touch.for_match(cfg, dev.match_id)
             key = _stage_key(cfg)
             if key not in prepared:
                 prepared[key] = prepare_stages(match, cfg)
@@ -1162,15 +1278,26 @@ def run_devset(configs, dev_cfg, matches, degrade=True, bootstrap_n=0, tags=Fals
                     **evidence_check(cleaned, dev.truth, cfg["possession"]),
                 }
             for mode in oracles:
-                oracle = oracle_dead_score(dead_score, dev.truth, missing, mode)
-                labels = predict_labels(match, cfg, (cleaned, track, oracle))
+                if mode == "switch":
+                    switch_cfg = oracle_switch_cfg(cfg, dev.truth, missing, cleaned.period,
+                                                   match.fps)
+                    labels = predict_labels(match, switch_cfg, prepared[key])
+                elif mode in ("touch_team", "touch_all"):
+                    touch_cfg = oracle_touch_cfg(cfg, cleaned, dev.truth, mode)
+                    labels = predict_labels(match, touch_cfg, prepared[key])
+                elif mode == "team_gaps":
+                    team_cfg = oracle_team_cfg(cfg, dev.truth, missing)
+                    labels = predict_labels(match, team_cfg, prepared[key])
+                else:
+                    oracle = oracle_dead_score(dead_score, dev.truth, missing, mode)
+                    labels = predict_labels(match, cfg, (cleaned, track, oracle))
                 out["scores"][oracle_name(name, mode)][dev.match_id] = score_labels(
                     dev.truth, labels, bootstrap_n)
                 if diagnose:
                     out["diagnosis"][oracle_name(name, mode)][dev.match_id] = spell_diagnosis(
                         dev.truth, labels, missing, match.fps)
-    return out
 
+    return out
 
 # --- the report --------------------------------------------------------------------------------
 

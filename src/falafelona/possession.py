@@ -89,12 +89,14 @@ class Possession:
         return self.smooth(codes, window)
 
 
-def viterbi(costs: np.ndarray, switch_cost) -> np.ndarray:
+def viterbi(costs: np.ndarray, switch_cost, team_switch=None) -> np.ndarray:
     """The cheapest state sequence: int[n] of state indices, given costs float[n, k].
 
     switch_cost: one number (every change costs the same) or a [k, k] table where
     switch_cost[a, b] is the cost of going from state a to state b (diagonal = 0).
     Total cost = sum of costs[t, state_t] + the switch cost of every change.
+    team_switch: optional float[n]; the cost of a switch between states 0 and 1 (H <-> A)
+    INTO frame t, in place of the table's (the learned hazard inside ball gaps).
     Deterministic: on ties, staying beats switching and a lower state index beats a higher one.
     """
     costs = np.asarray(costs, dtype=np.float64)
@@ -111,9 +113,17 @@ def viterbi(costs: np.ndarray, switch_cost) -> np.ndarray:
 
     order = np.array([[s, *[p for p in range(k) if p != s]] for s in range(k)])
 
+    if team_switch is not None:
+        team_switch = np.asarray(team_switch, dtype=np.float64)
+        if k < 2 or team_switch.shape != (n,):
+            raise ValueError(f"team_switch must be float[{n}] and needs at least 2 states")
+        transition = transition.copy()
+
     back = np.zeros((n, k), dtype=np.int8)
     total = costs[0].copy()
     for t in range(1, n):
+        if team_switch is not None:
+            transition[0, 1] = transition[1, 0] = team_switch[t]
         candidates = total[order] + transition[order, np.arange(k)[:, None]]  # [state, prev]
         pick = np.argmin(candidates, axis=1)
         back[t] = order[np.arange(k), pick]
@@ -482,8 +492,16 @@ def touch_events(match, section):
 
 
 def _touch(match, section):
-    """float[n, 2] touch costs, or None when possession.touch is not set (off)."""
-    events = touch_events(match, section)
+    """float[n, 2] touch costs, or None when possession.touch is not set (off).
+    The dev set's touch oracles hand in the touches themselves (devset.oracle_touch_cfg).
+    With a `touch_learned:` block the touches' teams come from learned_touch.py instead of the
+    nearest-player rule."""
+    if "touch_learned" in section and "_oracle_touch_events" not in section:
+        if "touch" not in section:
+            raise ValueError("possession.touch_learned needs the possession.touch block")
+        from falafelona import learned_touch
+        return learned_touch.touch_costs(match, section)
+    events = section.get("_oracle_touch_events") or touch_events(match, section)
     if events is None:
         return None
     block = section["touch"]
@@ -501,11 +519,14 @@ CONFIG_KEYS = {
     "": ("method", "window", "dead_threshold", "dead_margin", "switch_cost", "team_evidence",
          "team_cost", "margin_scale", "near_distance", "dead_weight", "to_dead_cost",
          "from_dead_cost", "evidence_lag", "fast_ball_speed", "velocity_match", "velocity",
-         "restart", "switch_placement", "touch"),
+                  "restart", "switch_placement", "min_spell_s", "touch", "learned", "hazard", "touch_learned"),
     "velocity": velocity.SETTING_KEYS,
     "touch": TOUCH_KEYS,
     "velocity_match": ("max_diff", "control_distance", "cost"),
     "restart": RESTART_KEYS,
+    "learned": ("model", "add_cost", "where"),
+    "hazard": ("model", "cost", "min_cost"),
+    "touch_learned": ("model", "cost"),
 }
 
 
@@ -615,6 +636,24 @@ def _number(section, key, *, whole=False):
         raise ValueError(f"possession.{key} must be {kind} >= 0, got {value!r}")
     return value
 
+def merge_short_spells(path: np.ndarray, min_len: int) -> np.ndarray:
+    """int[n]: path with every H / A run shorter than min_len frames that sits between two runs
+    of the OTHER team given to that team. CHALLENGE.md: a touch without control or a deflection
+    is not a change of possession. Runs next to D (a restart has a clear possessor) or at the
+    ends are kept. Pure function: the input is not modified."""
+    out = np.asarray(path).copy()
+    if min_len <= 1 or len(out) == 0:
+        return out
+    edges = np.flatnonzero(np.diff(out)) + 1
+    starts = np.concatenate(([0], edges))
+    stops = np.concatenate((edges, [len(out)]))
+    codes = out[starts]
+    for k in range(1, len(starts) - 1):
+        if codes[k] == D_STATE or stops[k] - starts[k] >= min_len:
+            continue
+        if codes[k - 1] == codes[k + 1] != D_STATE:
+            out[starts[k]:stops[k]] = codes[k - 1]
+    return out
 
 def _placement(section):
     """The switch_placement fraction (0 to 1), or None when it is not set (off)."""
@@ -634,8 +673,46 @@ def _team_codes(match, dead_score, section):
     return np.where(dead, Possession.NOBODY, codes).astype(np.int8)
 
 
-TEAM_EVIDENCE = ("nearest", "margin")
+def _learned_extra(match, section, evidence):
+    """float[n, 2] learned team costs added ON TOP of the main evidence, or None (off).
 
+    possession.learned.add_cost: weight of the learned model's log-odds when team_evidence is
+    not "learned". learned.where: "gaps" (default; only frames with the ball missing, where the
+    other evidence is empty) or "all". Not moved by evidence_lag: the model is fitted per frame.
+    """
+    block = section.get("learned")
+    if evidence == "learned" or not isinstance(block, dict) or "add_cost" not in block:
+        return None
+    from falafelona import learned_team
+    learned_team.check_settings(section)
+    cost = _positive(block, "add_cost", "learned")
+    where = block.get("where", "gaps")
+    if where not in ("gaps", "all"):
+        raise ValueError(f"possession.learned.where must be 'gaps' or 'all', got {where!r}")
+    costs = learned_team.team_costs(learned_team.home_chance(match, section), cost)
+    if where == "gaps":
+        costs[~np.isnan(np.asarray(match.ball_xy)[:, 0])] = 0.0
+    return costs
+
+
+TEAM_EVIDENCE = ("nearest", "margin", "learned")
+
+
+
+def _team_switch(match, section, switch_cost):
+    """float[n] H <-> A switch cost per frame from the learned hazard (learned_switch.py),
+        or None when there is no `hazard:` block (the same cost everywhere, as before).
+    The dev set's switch oracle hands in the costs itself (devset.oracle_switch_cfg)."""
+    if "_oracle_team_switch" in section:
+        return np.asarray(section["_oracle_team_switch"], dtype=float)
+    if "hazard" not in section:
+        return None
+    from falafelona import learned_switch
+    learned_switch.check_settings(section)
+    block = section["hazard"]
+    in_gap, q, base = learned_switch.switch_chance(match, section)
+    return learned_switch.team_switch_costs(in_gap, q, base, switch_cost,
+                                            block["cost"], block["min_cost"])
 
 def _hmm(match, dead_score, section):
     """3-state HMM: H, A and D decoded together with Viterbi.
@@ -664,6 +741,10 @@ def _hmm(match, dead_score, section):
     if evidence == "nearest":
         codes, _ = Possession(match).nearest_player_labels()
         team = nearest_team_costs(codes, team_cost)
+    elif evidence == "learned":
+        from falafelona import learned_team
+        learned_team.check_settings(section)
+        team = learned_team.team_costs(learned_team.home_chance(match, section), team_cost)
     else:
         d_home, d_away = team_distances(match.players_xy, match.ball_xy, match.slot_team)
         team = margin_team_costs(d_home, d_away, team_cost,
@@ -686,11 +767,20 @@ def _hmm(match, dead_score, section):
     touch = _touch(match, section)            # after the lag: a touch is already timed
     if touch is not None:
         team = team + touch
+    learned_extra = _learned_extra(match, section, evidence)
+    if learned_extra is not None:
+        team = team + learned_extra
+    if "_oracle_team_extra" in section:  # dev set only: devset.oracle_team_cfg
+        team = team + np.asarray(section["_oracle_team_extra"], dtype=float)
     costs = add_dead_costs(team, dead_score, dead_weight)
-    path = viterbi(costs, table)
+    team_switch = _team_switch(match, section, table[H_STATE, A_STATE])
+    path = viterbi(costs, table) if team_switch is None else viterbi(costs, table, team_switch)
     placement = _placement(section)
     if placement is not None:
         path = place_switches(path, costs, placement)
+    if "min_spell_s" in section:
+        min_len = int(np.floor(_number(section, "min_spell_s") * match.fps + 0.5))
+        path = merge_short_spells(path, min_len)
     return np.array(STATES)[path]
 
 

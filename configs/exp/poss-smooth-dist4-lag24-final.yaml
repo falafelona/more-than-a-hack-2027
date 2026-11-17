@@ -1,0 +1,84 @@
+seed: 0
+ball:
+  method: interpolate
+  max_gap: 0.5
+  max_speed: 40.0
+  speed_slack: 1.0
+deadball:
+  method: combined
+  weights:
+    before_kickoff: 1.0
+    out_of_bounds: 1.0
+    before_restart: 0.6
+    gap_chance: 0.3
+    still_ball_at_spot: 0.6
+    learned: 0.7
+  out_margin: 1.0
+  still_speed: 1.0
+  speed:
+    half_window_s: 0.2
+    min_points: 5
+    min_each_side: 2
+    max_speed: 12.0
+  still_ball_speed: 0.5
+  still_ball_seconds: 2.0
+  spot_line_m: 2.0
+  spot_centre_m: 3.0
+  goal_area_depth_m: 5.5
+  goal_area_half_width_m: 9.16
+  ball_speed:
+    half_window_s: 0.2
+    min_points: 5
+    min_each_side: 2
+  gap:
+    intercept: -1.0
+    length_weight: 0.25
+    line_distance: 2.0
+    spot_distance: 3.0
+    tag_seconds: 5.0
+    weights:
+      last_seen_near_line: 1.0
+      reappears_near_line: 1.0
+      reappears_at_centre: 1.5
+      players_still: 2.0
+      restart_tag_after: 0.0
+  restart_seconds:
+    throw-in: 8
+    corner kick: 15
+    goal kick: 20
+    free kick: 25
+    kick off (after goal): 45
+  learned:
+    model: models/deadball_stoppage_all.json
+possession:
+  method: hmm
+  team_evidence: margin
+  team_cost: 0.5
+  margin_scale: 1.0
+  near_distance: 5.0
+  dead_weight: 2  # SWEEP (base: 2.0)
+  switch_cost: 10  # SWEEP (base: 3.5)
+  to_dead_cost: 18  # SWEEP (base: 6.0)
+  from_dead_cost: 18  # SWEEP (base: 6.0)
+  evidence_lag: 24
+  fast_ball_speed: 12
+  switch_placement: 1.0
+  touch:
+    offset_s: 0.12
+    min_change: 3.0
+    distance: 4.0
+    margin: 0.1
+    hold_s: 0.8
+    cost: 2.0
+  restart:
+    threshold: 0.5
+    min_dead_s: 3.0
+    look_s: 2.0
+    boost_s: 2.0
+    cost: 0.5
+  velocity:
+    half_window_s: 0.12
+    min_points: 4
+    min_each_side: 1
+output:
+  x_policy: none

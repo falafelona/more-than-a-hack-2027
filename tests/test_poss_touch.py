@@ -1,5 +1,7 @@
 # ws:poss: touch evidence (possession.touch). Made-up numbers only, no match data.
 
+import copy
+
 import numpy as np
 import pytest
 import synthetic_idsse as syn
@@ -12,6 +14,8 @@ FPS = 25.0
 H, A = possession.H_STATE, possession.A_STATE
 # final.yaml without any touch block, so the tests hold before and after final.yaml takes it
 FINAL = load_config(vendor.REPO_ROOT / "configs" / "final.yaml")
+FINAL = copy.deepcopy(FINAL)
+FINAL["possession"].pop("touch_learned", None)   # these tests check the rule touches only
 FINAL = {**FINAL, "possession": {k: v for k, v in FINAL["possession"].items() if k != "touch"}}
 TOUCH = {"offset_s": 0.2, "min_change": 5.0, "distance": 1.5, "margin": 1.0, "hold_s": 0.4,
          "cost": 0.5}
@@ -178,3 +182,11 @@ def test_evidence_check_counts_and_report(dev):
     assert 0 <= d["touches_claim_right"] <= d["touches_claim"] <= d["touches_scored"]
     assert "a claimed switch" in text
     assert "touch evidence:" in text
+
+def test_a_short_spell_between_the_other_team_is_merged_but_not_after_a_stoppage():
+    h, a, d = possession.H_STATE, possession.A_STATE, possession.D_STATE
+    path = np.array([a] * 5 + [h] * 3 + [a] * 5 + [d] * 2 + [h] * 2 + [a] * 4)
+    out = possession.merge_short_spells(path, 4)
+    assert list(out[:13]) == [a] * 13          # the 3-frame H between A runs is merged
+    assert list(out[15:17]) == [h, h]          # the H right after D is kept
+    assert list(path[5:8]) == [h] * 3          # the input is not changed
