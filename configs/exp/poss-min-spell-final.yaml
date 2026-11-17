@@ -56,10 +56,10 @@ possession:
   team_cost: 0.5
   margin_scale: 1.0
   near_distance: 5.0
-  dead_weight: 2  # SWEEP (base: 2.0)
-  switch_cost: 10  # SWEEP (base: 3.5)
-  to_dead_cost: 18  # SWEEP (base: 6.0)
-  from_dead_cost: 18  # SWEEP (base: 6.0)
+  dead_weight: 2
+  switch_cost: 10
+  to_dead_cost: 18
+  from_dead_cost: 18
   evidence_lag: 24
   learned:
     model: models/team_smooth4g_all.json
