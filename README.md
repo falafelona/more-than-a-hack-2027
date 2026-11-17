@@ -5,7 +5,7 @@ Team **Falafelona**'s entry for [More Than a Hack 2027](https://landing.mobilewo
 
 **Team:** Mohamed Chikhani · Tala Fakhreddine · Mohamed Khaled · Laila Mansour · Abdallah Kassem
 
-**Status:** submitted. The submission is tag `[FILL: tag]`, built from `configs/final.yaml`: 199,319 rows, official validator OK, SHA-256 `[FILL: sha256]`. Every setting was chosen on the IDSSE dev set, never on this match. On the smoothed dev set it scores spellF1 0.452 to 0.513 across our four runs; on the original dev set, our first submission had already roughly doubled the baseline configuration's score (0.455 to 0.519, against 0.201 to 0.269). The organisers' baseline on this match: spellF1 **0.2433**.
+**Status:** submitted. The submission is tag `v1.3`, built from `configs/final.yaml`: 199,319 rows, official validator OK, SHA-256 `f8241f4f57a81a1076667a41929b64275eca9bd3ae0c8ebceb33bbee9275a35e`. Every setting was chosen on the IDSSE dev set, never on this match. On the original dev set it scores spellF1 0.518 to 0.577 across our four runs, against 0.455 to 0.519 for our first submission (v1.2) and 0.201 to 0.269 for the baseline configuration. The organisers' baseline on this match: spellF1 **0.2433**.
 
 **The technical document is [docs/Falafelona.md](docs/Falafelona.md).**
 
@@ -61,7 +61,7 @@ Needs Python 3.12, `make`, `git`, and the organisers' data bundle in a folder **
 ```bash
 git clone --recurse-submodules https://github.com/falafelona/more-than-a-hack-2027
 cd more-than-a-hack-2027
-git checkout [FILL: tag]                  # the submitted version
+git checkout v1.3                         # the submitted version
 make setup                                # .venv and pinned dependencies
 export MTAH_DATA_DIR=/path/to/mtah-data   # the organisers' data bundle, outside this repo
 make submission                           # writes outputs/Falafelona.csv from configs/final.yaml
@@ -69,7 +69,7 @@ make validate                             # the official validate_submission.py
 shasum -a 256 outputs/Falafelona.csv
 ```
 
-Expected: `outputs/Falafelona.csv`, 199,319 rows, validator OK, SHA-256 `[FILL: sha256]`.
+Expected: `outputs/Falafelona.csv`, 199,319 rows, validator OK, SHA-256 `f8241f4f57a81a1076667a41929b64275eca9bd3ae0c8ebceb33bbee9275a35e`.
 
 The run is deterministic and needs no training: the fitted models are small JSON files in `models/`. We built the file twice and got the identical SHA-256.
 

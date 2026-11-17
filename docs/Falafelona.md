@@ -7,8 +7,8 @@ Athletic Club saying who has the ball (`H` Barcelona, `A` Athletic, `D` dead bal
 |---|---|
 | Team | Falafelona: Mohamed Chikhani, Tala Fakhreddine, Mohamed Khaled, Laila Mansour, Abdallah Kassem |
 | Repository | https://github.com/falafelona/more-than-a-hack-2027 |
-| Submitted version | tag `[FILL: tag]` (commit `[FILL: commit]`), built from `configs/final.yaml` |
-| Possession file | `Falafelona.csv`, 199,319 rows, SHA-256 `[FILL: sha256]` |
+| Submitted version | tag `v1.3`, built from `configs/final.yaml` |
+| Possession file | `Falafelona.csv`, 199,319 rows, SHA-256 `f8241f4f57a81a1076667a41929b64275eca9bd3ae0c8ebceb33bbee9275a35e` |
 
 All numbers in this document are aggregates. It contains no match data and no frame-level values.
 
@@ -169,7 +169,7 @@ touch, from 20 inputs: the distance margin between the two teams before, at and 
 and 1 s later (the receiver), how many players of each team are close, which team's nearest
 player moves *with* the ball afterwards, the ball's direction along each team's attack, the
 rule's answer for this touch and its neighbours, ball speeds, and the time to the neighbouring
-touches. It is right on 90.2% of all touches, on matches it was not fitted on. For 0.8 s after
+touches. It is right on 90.2% of all touches, on matches it was not fitted on. For 2.0 s after
 a touch, the team the model thinks does *not* have the ball pays `2.0 × |log-odds|` per frame,
 so a confident call weighs more than an unsure one.
 
@@ -312,7 +312,7 @@ How our labels follow the official definitions (CHALLENGE.md), as set in `config
 | Loose or contested ball | Possession stays with the last team that had it | When no player is within 5 m of the ball there is no distance evidence, so the decoder keeps the current state unless a touch or the gap model says otherwise |
 | A deflection, a touch without control | Not a change of possession | A change has a cost, so a few frames of evidence for the other team cannot pay for it. A spell under 1 s inside the other team's possession is given back to that team |
 | Controlled possession by the other team | A change of possession | Sustained evidence (the other team clearly closer to the ball over several frames, or a confident touch) pays the switch cost. Distance evidence is moved 0.96 s later, because the receiver nears the ball before the touch |
-| A short possession by the other team | A controlled touch is a possession, however short | A touch gives its team evidence for 0.8 s, weighted by how sure the touch model is. A spell must last at least 1 s, unless it borders a dead ball |
+| A short possession by the other team | A controlled touch is a possession, however short | A touch gives its team evidence for 2.0 s, weighted by how sure the touch model is. A spell must last at least 1 s, unless it borders a dead ball |
 | A challenge or duel | No change without control | The touch model sees both teams' distances around the touch; when it is unsure, its evidence is close to zero |
 | The moment of the change | When the new team takes control | Inside a stretch with no evidence, the switch goes to the end of the stretch: when the ball arrives, not when it leaves |
 | Aerial duel, a ball flying past | Not a change without control | Our tracking has no ball height. While the ball moves faster than 12 m/s, no player gets distance evidence, so the ball must slow down near a player, or be touched, before possession can change |
@@ -332,20 +332,22 @@ set with the IDSSE ball as it is; every later step was scored on the smoothed de
 (section 3). Smoothing lowers every score, so numbers from the two are not comparable: each step
 below is compared with the step before it on the same dev set.
 
-**The submitted version.** Mean spellF1 over the 7 matches, official metric. Because of the
-change of dev set, the gain over the baseline is shown in two parts, each on one dev set.
+**The submitted version.** Mean spellF1 over the 7 matches, official metric, with the
+leave-one-match-out models. The first submission (v1.2) and the submitted version were both
+scored on both dev sets, so the last two columns of each dev set compare like with like.
 
-| Dev-set run | Original dev set: baseline configuration | Original dev set: first submission (v1.2) | Smoothed dev set: after costs and timing | Smoothed dev set: submitted |
-|---|---|---|---|---|
-| seed 0, random gaps | 0.212 | 0.470 | 0.377 | **0.462** |
-| seed 0, stoppage gaps | 0.269 | 0.519 | 0.412 | **0.513** |
-| seed 1, random gaps | 0.201 | 0.455 | not reported | **0.452** |
-| seed 1, stoppage gaps | 0.266 | 0.507 | not reported | **0.499** |
+| Dev-set run | Original: baseline configuration | Original: v1.2 | Original: submitted | Smoothed: v1.2 | Smoothed: submitted |
+|---|---|---|---|---|---|
+| seed 0, random gaps | 0.212 | 0.470 | **0.518** | 0.374 | **0.474** |
+| seed 0, stoppage gaps | 0.269 | 0.519 | **0.577** | 0.414 | **0.526** |
+| seed 1, random gaps | 0.201 | 0.455 | **0.522** | 0.369 | **0.465** |
+| seed 1, stoppage gaps | 0.266 | 0.507 | **0.566** | 0.405 | **0.515** |
 
-On the original dev set the first submission roughly doubled the baseline configuration's score.
-On the smoothed dev set, the steps after it added +0.085 / +0.101 (seed 0, random / stoppage).
-The costs-and-timing step in between gained +0.022 / +0.021 and then +0.009 / +0.010 on the
-original dev set (table below).
+On the original dev set the first submission roughly doubled the baseline configuration's score,
+and the submitted version adds +0.049 to +0.067 on top of it (better on 6 or 7 of the 7 matches
+in every run). On the smoothed dev set the gain over v1.2 is +0.096 to +0.111 (7 of 7 in every
+run). Every setting after v1.2 was chosen on the smoothed dev set, so we take the original dev
+set's gain as the conservative figure.
 
 **What we kept, step by step** (change in dev-set spellF1 against the step before it, mean over
 the 7 matches; seed 0 random / stoppage, then seed 1 random / stoppage).
@@ -371,6 +373,7 @@ the 7 matches; seed 0 random / stoppage, then seed 1 random / stoppage).
 | + gap team model v5 (team shape) | +0.005 / +0.006 | not reported | kept by decision |
 | + dead-ball model v3 | +0.006 / +0.011 | +0.005 / +0.009 | kept by decision |
 | + touch team model | +0.015 / +0.021 | +0.013 / +0.021 | kept by decision |
+| + touch hold 2.0 s (was 0.8 s) | +0.014 / +0.016 | +0.016 / +0.020 | kept by decision: also better on the original dev set (+0.007 to +0.015), and better than 1.2 s in all 8 runs |
 
 **What limits the score** (oracle runs: one part of the pipeline is given the truth, the rest
 stays real; smoothed dev set, seed 0, random gaps, against the configuration of the time).
@@ -401,7 +404,7 @@ stays real; smoothed dev set, seed 0, random gaps, against the configuration of 
 | Restart windows halved, or the tag clue off (with simulated tags) | +0.002 to +0.007 | Gains in all four runs, but on only 5 of 7 matches in at least one |
 | Learned dead-ball score alone, or only inside gaps | wins under random gaps only | Worse under stoppage gaps; the blend fixed this |
 | Dead-ball weight 0.85 instead of 0.7; dead-ball models refitted on the smoothed dev set | +0.004 / +0.001; +0.008 / −0.004 | Within noise, or mixed signs |
-| Touch: smaller or larger velocity change (2.0, 1.5, 4.0 m/s); hold 0.5 s | −0.003 to −0.019 | 3 m/s and 0.8 s were best |
+| Touch: smaller or larger velocity change (2.0, 1.5, 4.0 m/s); hold 0.5 s | −0.003 to −0.019 | 3 m/s was best; a shorter hold was worse (the hold went up to 2.0 s instead) |
 | Gap team model: on every frame, or as the only team evidence; weight above 0.25 | worse | The distance margin and touches are better where the ball is seen; a larger weight over-trusts an 83% model |
 | Gap team model v6 (more timing inputs); the same inputs in a gradient-boosted model (LightGBM, a check only) | +0.002 / +0.002; gap accuracy 0.827 to 0.834 | Both stop at about 83%: the inputs, not the model, are the limit |
 | Gap team model v4 without the team-shape inputs; minimum spell 2 s | worse | The shape inputs carry signal; 2 s removes real short possessions |
@@ -416,14 +419,15 @@ versions).
 | | Submitted |
 |---|---|
 | Rows | 199,319, no `X` |
-| Graded halves: `H` / `A` / `D` | [FILL: H% / A% / D%, graded halves] |
-| All frames: `H` / `A` / `D` | [FILL: H% / A% / D%, all frames] |
-| Possessions | [FILL: number of possessions], mean [FILL: mean length] s |
+| Graded halves: `H` / `A` / `D` | 31.8% / 24.8% / 43.4% |
+| All frames: `H` / `A` / `D` | 25.3% / 19.8% / 54.9% |
+| Possessions | 444, mean 8.1 s (v1.2: 518, mean 6.8 s) |
 | Outside the graded halves | every frame is `D` (40,462 frames, never scored) |
 
 Each new version was compared with the one before it on our match. The dead-ball model v3
 changed 1.5% of the frames; the touch model changed 2.3%, almost all `H` to `A` or `A` to `H`,
-with the dead-ball share unchanged. For reference, the baseline configuration gives 669
+with the dead-ball share unchanged. Against v1.2, the submitted version changes 6.6% of the
+frames, three quarters of them `H` to `A` or `A` to `H`. For reference, the baseline configuration gives 669
 possessions on our match; the public five minutes hold 17 possessions averaging 14.2 s, and
 the IDSSE matches 370–511 possessions of 5.5–9.2 s each.
 
@@ -456,6 +460,8 @@ windows are as calm (17 possessions or fewer, 14.2 s or longer on average;
 
 - **Most of our later steps gained less than +0.04.** We adopted them because all four runs
   agreed, by team decision. Each is small enough that, on its own, part of it may be noise.
+  Together they pass: the submitted version beats v1.2 by more than +0.04 in all 8 runs on
+  both dev sets.
 - **Many choices were made on the same 7 matches.** The learned models are scored
   leave-one-match-out, but the choice *between* variants (blend weights, model versions, costs,
   touch settings) was made on the same matches, so the total gain is likely somewhat flattered.
@@ -464,8 +470,10 @@ windows are as calm (17 possessions or fewer, 14.2 s or longer on average;
 - **The possession count does not always move the same way on the two sets.** Some steps
   changed the count on our match in the opposite direction from the dev set: the learned team
   evidence gave more possessions on the dev set but fewer, longer ones on our match
-  (`scripts/team_diag.py` compares the two, label-free). We cannot tell which is right without
-  answers, and the dev set's own counts stay below its truth.
+  (`scripts/team_diag.py` compares the two, label-free). From v1.2 to the submitted version the
+  count falls on both (518 to 444 on our match). We cannot tell which is right without answers,
+  and the dev set's own counts stay below its truth: our possessions are longer than the true
+  ones there.
 
 **What the dev set cannot tell us.**
 
@@ -495,7 +503,7 @@ small JSON files in `models/`.
 ```bash
 git clone --recurse-submodules https://github.com/falafelona/more-than-a-hack-2027
 cd more-than-a-hack-2027
-git checkout [FILL: tag]                  # the submitted version
+git checkout v1.3                         # the submitted version
 make setup                                # .venv and pinned dependencies
 export MTAH_DATA_DIR=/path/to/mtah-data   # the data bundle, outside the repo
 make submission                           # writes outputs/Falafelona.csv from configs/final.yaml
@@ -506,9 +514,9 @@ shasum -a 256 outputs/Falafelona.csv
 | | |
 |---|---|
 | Output | `outputs/Falafelona.csv`, 199,319 rows, header `frame,label` |
-| Expected SHA-256 | `[FILL: sha256]` |
+| Expected SHA-256 | `f8241f4f57a81a1076667a41929b64275eca9bd3ae0c8ebceb33bbee9275a35e` |
 | Official validator | OK |
-| Tests | `make check`: lint, and 880 tests on synthetic data only (no match data needed) |
+| Tests | `make check`: lint, and 885 tests on synthetic data only (no match data needed) |
 
 **Determinism.** A fixed seed, no order-dependent parallelism, and the models are applied, not
 trained, at run time. We built the submitted file twice and got the identical SHA-256.
